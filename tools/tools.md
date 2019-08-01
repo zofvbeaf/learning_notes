@@ -143,6 +143,8 @@ gdb ./a.out 12345 # 12345为进程pid号。等价于gdb进入后attatch 12345
   # 调试double free
   # 如果用的glibc可在gdb中设置环境变量为2进行调试，会在double free处停止（不知道效果如何反正编译时-g参数也能用）
   set environment MALLOC_CHECK_ 2
+  
+  print *(myVector._M_impl._M_start)@myVector.size() # 打印vector
   ```
 
 ## git
@@ -969,5 +971,13 @@ stap inodewatch.stp  0xfd 0x00 523170    # 主设备号, 辅设备号, inode号,
 #某个进程的CPU运行情况
 #top
 #pidstat
+
+# vim
+^@替换：
+:%s/\%x00/ /g
+^A替换：
+:%s/\%x01/ /g
+^M替换：
+:%s/\%x02/ /g
 ```
 

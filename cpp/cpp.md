@@ -485,19 +485,21 @@ void push_front( const T& value );
 void pop_front();
 ```
 
-+ iterator : RandomAccessIterator
++ `iterator : RandomAccessIterator`
 
 + 分段连续线性空间，随时可以增加一段新的空间。`deque`允许于常数时间内对头尾端进行插入或删除元素。
 
-+  deque 的每次分配 node（缓冲区）都会分配完整的 512 个字节，使用完之后会继续分配新的缓冲区。
++  `deque` 的每次分配 `node`（缓冲区）都会分配完整的 512 个字节，使用完之后会继续分配新的缓冲区。
 
-+  deque 有 size 和 max_size 方法获取已使用的空间和已分配的空间。
++  deque 有 `size` 和 `max_size` 方法获取已使用的空间和已分配的空间。
 
 + 为了管理这些分段空间deque容器引入了一种中控器`map`，`map`是一块连续的空间，其中每个元素是指向缓冲区的指针，缓冲区才是`deque`存储数据的主体。
 
 + `deque`容器具有维护`map`和迭代器的功能，`deque`定义的两个迭代器分别是`start`和finish，分别指向第一个缓冲区的第一个元素和最后一个缓冲区的最后一个元素的下一个位置；
 
 + 当对`deque`的元素进行排序时，为了提高效率，首先把`deque`数据复制到`vector`，利用`vector`的排序算法(利用`STL`的`sort`算法)，排序之后再次复制回`deque`。
+
++  deque 典型地拥有较大的最小内存开销；只保有一个元素的 deque 必须分配其整个内部数组（例如 64 位 libstdc++ 上为对象大小 8 倍； 64 位 libc++ 上为对象大小 16 倍或 4096 字节的较大者）
 
 + 一个deque相当大，占据80个字节。
 
@@ -997,6 +999,53 @@ private:
 
 + `void lock( Lockable1& lock1, Lockable2& lock2, LockableN&... lockn );`
   + 锁定给定的可锁 (Lockable) 对象 lock1 、 lock2 、 ... 、 lockn ，用免死锁算法避免死锁。
+
+### future
+
+```c++
+#include <vector>
+#include <thread>
+#include <future>
+#include <numeric>
+#include <iostream>
+#include <chrono>
+ 
+void accumulate(std::vector<int>::iterator first,
+                std::vector<int>::iterator last,
+                std::promise<int> accumulate_promise)
+{
+    int sum = std::accumulate(first, last, 0);
+    accumulate_promise.set_value(sum);  // 提醒 future
+}
+ 
+void do_work(std::promise<void> barrier)
+{
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    barrier.set_value();
+}
+ 
+int main()
+{
+    // 演示用 promise<int> 在线程间传递结果。
+    std::vector<int> numbers = { 1, 2, 3, 4, 5, 6 };
+    std::promise<int> accumulate_promise;
+    std::future<int> accumulate_future = accumulate_promise.get_future();
+    std::thread work_thread(accumulate, numbers.begin(), numbers.end(),
+                            std::move(accumulate_promise));
+    accumulate_future.wait();  // 等待结果
+    std::cout << "result=" << accumulate_future.get() << '\n';
+    work_thread.join();  // wait for thread completion
+ 
+    // 演示用 promise<void> 在线程间对状态发信号
+    std::promise<void> barrier;
+    std::future<void> barrier_future = barrier.get_future();
+    std::thread new_work_thread(do_work, std::move(barrier));
+    barrier_future.wait();
+    new_work_thread.join();
+}
+```
+
+
 
 ## 其它
 
