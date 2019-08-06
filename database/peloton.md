@@ -176,3 +176,93 @@
 ## 其它
 
 + `visitor`模式在遍历子树时较方便。
+
+### 已做的优化
+
+#### 等价谓词重写
+
++ 表达式预计算
++ `between and`转化
++ `IN(1, 2, 3)` 转 `OR`
++ `OR`和`ANY`也可以互转，但要看底层执行是否对`ANY`有优化，比如建了索引或哈希表。
++ `a > ANY (1, 2)` 转为 `a > 1`
++ `NOT (a != b)` 转为 `a = b`
+
+#### 外连接消除
+
++ 目的：将外连接转换为内连接，从而更好地选择表的连接顺序。
++ 右外连接一般会转为左外连接处理。
++ 当外连接对应会补`NULL`的列在`where`中去掉了NULL的行时(如：`where col IS NOT NULL`)，可以转换为内连接。
+
+#### 嵌套连接消除
+
++ 如果连接表达式只包括内连接，括号可以去掉
+
++ 如果连接表达式包括外连接，括号不可以去掉，至多能进行的就是外连接消除
+
+  ```sql
+  SELECT * 
+  FROM t1 LEFT JOIN (t2 LEFT JOIN t3 ON t2.b = t3.b) ON t1.a = t2.a
+  WHERE t1.a > 1
+  ```
+
+#### 连接消除
+
++ 主外键关系的表进行的连接，可消除主键表，这不会影响对外键表的查询。
+
++ 唯一键作为连接条件，三表内连接（中间表的列只作为连接条件）可以去掉中间表。
+
++ 其他一些特殊形式，可以消除连接操作
+
+  ```sql
+  SELECT MAX(a1) FROM A, B;
+  SELECT DISTINCT a1 FROM A, B;
+  SELECT a1 FROM A, B GROUP BY a1;
+  ```
+
+#### 子查询合并（Coalescing）
+
++ 含相同语句块的几个语句求OR或AND，可合并为一个语句。
+
+#### 子查询展开（Unnesting）
+
++ 即子查询上拉或反嵌套
+
++ 如果子查询中出现了`AGG`，`GROUP BY`，`DISTINCT`子句，则子查询只能单独求解，不可以上拉。
+
++ 如果子查询只是简单的`SPJ`，则可以上拉。
+
++ 子查询上拉的前提是上拉后不能带来多余的元组。
+
++ 仅`EXISTS`的相关子查询可以上拉
+
++ `IN`类型
+
+  ```sql
+  outexpr IN (SELECT inexpr FROM ... WHERE subquery_where)
+  -- 可被优化为
+  EXISTS (SELECT 1 FROM ... WHERE subquery_where AND outexpr = inexpr)
+  ```
+
+  + 相当于被优化为`semi-join`。
+
+  + **前提**：
+
+    + `outexpr`和`inexpr`不能为`NULL`
+    + 不需要从结果为FALSE的子查询中区分`NULL`
+
+  + 若仅`outexpr`是非`NULL`的，则转换为
+
+    ```sql
+    EXISTS (SELECT 1 FROM ... WHERE subquery_where AND (outexpr = inexpr OR inexpr IS NULL))
+    ```
+
++ `ALL/ANY/SOME`
+
+  + `SOME`与`ANY`意义相同
+  + `=ANY`与`IN`相同
++ `val > ALL(SELECT ...)` 等价于 `val > MAX(SELECT ...)`
+  
++ `EXISTS`
+
+  + 相关子查询会上拉

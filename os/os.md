@@ -1,4 +1,4 @@
-## 1. Course
+1. Course
 
 + [MIT 6.828](<https://pdos.csail.mit.edu/6.828/2018/schedule.html>)
 + [ustc os](<http://staff.ustc.edu.cn/~xlanchen/OperatingSystemConcepts2017Spring/OperatingSystem2017Spring.htm>)
@@ -435,6 +435,7 @@ enum zone_type {
   + `go`为有栈协程，切换时会保存整个栈的状态。
 + 一般的`pthread`线程都是内核态线程，每次线程切换都需要陷入到内核，由操作系统来调度。另外内核态实现会占用内核稀有的资源，因为操作系统要维护线程列表，操作系统所占内核空间一旦装载后就无法动态改变，并且线程的数量远远大于进程的数量，随着线程数的增加内核将耗尽；
 + `fork`实现：
+  + fork返回值大于0为父进程，等于0为子进程，小于0为出错
   + 页表的拷贝是复制父进程的所有页表，只是最后一级页表指向的物理页相同，但需要把那一项设置为只读，在写时会触发page fault重新分配物理页。
   + 文件的拷贝是拷贝`file`数组，指针指向的`file`为相同的，父子进程对文件偏移的更改互相是看得到的。
 
@@ -561,6 +562,15 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
       unsigned int __g1_orig_size;
   };
   ```
+
+#### 互斥量
+
++ 阻塞时会睡眠
+
+#### 自旋锁
+
++ 与互斥量类似，但它不通过休眠使进程阻塞，而是在获取锁之前一直处于忙等（自旋阻塞状态）。自旋锁可用于以下情况：
+  + 锁被持有时间短，而且线程不希望在重新调度上花费太多的成本。
 
 #### 问题
 
@@ -697,7 +707,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 ## 6. 文件系统
 
-### 6.1 文件描述符表(fd)
+### 文件描述符表(fd)
 
 + 其实就是每个进程的`file`数组的下标。
 
@@ -721,11 +731,17 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
   }
   #define current get_current()
   ```
+  
++ 写未开启写的`fd`会返回`EBADF`
 
-### 6.2 socketfd
+###  socketfd
 
 + `int socket(int domain, int type, int protocol);`返回一个fd。
   + 内部调用`sock_alloc_file`，对应的`f_op`为`socket_file_ops`，`f_op.poll`为`sock_poll`，`sock_poll`根据情况会调用到`tcp_poll`或`udp_poll`等。
+
+### I/O栈
+
+![](https://ws1.sinaimg.cn/large/77451733gy1g5onviw5jzj21cr1x3dzv.jpg)
 
 ## 7. 系统调用
 
@@ -741,6 +757,17 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     + 需要设置各种寄存器、切换权限等级，各种检查。
 
 ## 8. 信号
+
++ 信号是软中断。信号定义在`bits/signum.h`中
+
++ 编号为0的信号为空信号，kill的signo为0时，只执行正常的错误检查，不发送信号，常被用来确定一个进程是否存在，不存在会返回-1，`errno`为`ESRCH`。
+
+  ```
+  SIGABRT
+  SIGALRM
+  ```
+
+  
 
 ## 9. IO管理
 
@@ -765,9 +792,277 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 ## 11. 进程间通信
 
+### 管道
+
+```c
+#include <unistd.h>
+
+// 错误返回 -1, 否则返回 0
+// pipefg[0] 读端, pipefg[1] 写端
+int pipe(int pipefd[2]); 
+```
+
++ 常用于父子进程之间通信
+
++ 在 `man 7 pip` 中 `Pipe capacity` 有相关的介绍，对于 2.6.11 之前的版本标准是一个页的大小，一般是 4K ，而在之后最大是 64K 。
+
++ `ulimit - a`可见`pipe size`为`512 * 8 = 4kB`（只读值，不可修改），而实际上内核会动态分配最大到 16 倍的缓冲，也就是最大到 `64K` 。其中的 16 倍是在源码的 `linux/pipe_fs_i.h` 文件中通过 `PIPE_DEF_BUFFERS` 宏定义写死的，所以，如果想要扩展 pipe 的最大能力，就需要修改宏重新编译内核。
+
++ `PIPE_SIZE`表示管道的容量，`PIPE_BUF`表示管道保证单次写入数据量小于`PIPE_BUF`的操作是原子的，linux下`PIPE_BUF`为4K，与`ulimit - a`所见结果相同。
+
++ 总之，pipe大小为64K，原子写最大4k，可设置的最大值为1M，见`/proc/sys/fs/pipe-max-size`。
+
++ [实现原理](https://jin-yang.github.io/post/linux-pipe-stuff-introduce.html)
+
+  + 源码位于`fs/pipe.c`，系统调用对应为`sys_pipe2` 
+  + `create_pipe_files`创建两个fd，一个只读，一个只写，并且创建两个file，这两个file指向同一个inode。
+  + 在 Linux 中，管道的实现并没有使用专门的数据结构，而是借助了文件系统的 `struct file` 和 VFS 的索引节点 `struct inode` ，通过将两个 file 结构指向同一个临时的 VFS 索引节点，而这个 VFS 索引节点又指向一个物理页面而实现的。
+
++ fork前，fd[0] 对应的file，file中引用计数为1，fork后，子进程继承了父进程的描述符，copy_process函数中把file引用计数加1，这样，file的引用计数为2，所以父子进程需要各自执行close(fd[0])才能把读端file的引用计数减成0，file才能彻底释放对应的pipe->reader才能为0
+
++ 比如shell，一般是fork子进程来执行命令，在shell子进程中访问shell父进程的用户变量（本地变量）时需要`export`。
+
+  + [shell执行命令的过程](https://juejin.im/post/5bc98b36f265da0af93b34c6)
+
+    ```bash
+    # shell 每次执行指令， 需要 fork 出一个子进程来执行，然后将子进程的镜像替换成目标指令，这又会用到 exec 函数。比如下面这条简单的指令
+    $ cmd 
+    # 当指令里面包含一个管道符，意味着需要并行执行两个指令，这时候 shell 需要 fork 两次生成两个子进程，然后分别 exec 换成目标指令。
+    $ cm1 | cmd2
+    ```
+
+    ![](https://ws1.sinaimg.cn/large/77451733gy1g5ojhiiw4rj20ig08ojrd.jpg)
+
+  + dup2，可重定向标准输入输出给管道
+
+    ```c
+    int dup(int oldfd); 
+    //  uses the lowest-numbered unused descriptor for the new descriptor.
+    int dup2(int oldfd, int newfd);
+    // makes newfd be the copy of oldfd, closing newfd first if necessary (oldfd所指向的内核对象的引用计数减为 0 时关闭), 如果oldfd与newfd相同则不做任何事，直接返回
+    ```
+
+
++ popen
+
+  ```c
+  #include <stdio.h>
+  
+  FILE *popen(const char *command, const char *type);
+  // type = 'w', fork子进程执行command, FILE * 连接到command的标准输入
+  // type = 'r', fork子进程执行command, FILE * 连接到command的标准输出
+  int pclose(FILE *stream); // 关闭I/O流，等待命令终止
+  ```
+
++ 协同进程：过滤程序从标准输入读取数据，处理之后写到标准输出。一个程序产生过滤程序的输入，同时又读取它的输出时，该过滤程序即称为协同进程。协同进程有连接到另一个进程的两个单向管道。
+
+  ![](https://ws1.sinaimg.cn/large/77451733gy1g5olycp08oj208302q3yc.jpg)
+
+### FIFO
+
+```cc
+#include <sys/types.h>
+#include <sys/stat.h>
+
+int mkfifo(const char *pathname, mode_t mode);
+
+#include <fcntl.h> /* Definition of AT_* constants */
+#include <sys/stat.h>
+
+int mkfifoat(int dirfd, const char *pathname, mode_t mode);
+```
+
++ 在指定路径创建指定mod的特殊文件，`mode`与`open`中的意思相同。用`open`打开创建的特殊文件。
++ FIFO也称为命名管道，使用它，不相关的进程也能交换数据。
+
+### IPC 
+
++ 有三种成为`XSI IPC`的`IPC`：消息队列，信号量已经共享存储器。
++ 客户进程和服务器进程访问同一个IPC结构主要有三种方式：
+  + 服务器进程指定 `IPC_PRIVATE` 来创建新的IPC结构，然后将返回的标识符通过文件或 `exec` 的参数（父子进程的情况）等方式告诉客户进程。
+  + 在公共头文件中定义客户进程和服务器进程都认可的键，然后服务器进程用该键来创建新的IPC结构，需要注意该键可能会已经关联了IPC结构，因此需要删除已存在的IPC结构。
+  + 用客户进程和服务器进程都认可的路径名和项目ID （0~255）来创建键，然后在方式2中使用该键。
+
+#### 标识符和键
+
++ 标识符
+
+  + 每个内核中的IPC结构（消息队列、信号量或共享内存）都用一个非负整数的**标识符**加以引用
+  + 与文件描述符不同，**IPC标识符**不是小的整数。当一个IPC结构被创建，然后又被删除时，与这种结构相关的标识符连续加1，直至到达一个整形数的最大正值，然后又回转到0
+
++ 键
+
+  + **标识符是IPC对象的内部名**。为使多个合作进程能够在同一IPC对象上汇聚，需要提供一个外部命名方案。为此，**每个IPC对象都与一个键相关联，将这个键作为该对象的外部名**（创建IPC结构时，应指定一个键）。**键的类型是基本系统数据类型key_t**，通常在`<sys/types.h>`中被定义为长整形。这个键由内核变换成标识符
+
++ 权限结构
+
+  + 每个IPC结构关联了一个`ipc_perm`结构（`<sys/ipc.h>`），规定了权限和所有者，至少包括以下成员：
+
+    ```c
+    struct ipc_perm{
+        uid_t uid;      /* 拥有者的有效用户ID */
+        gid_t gid;      /* 拥有者的有效组ID */
+        uid_t cuid;     /* 创建者的有效用户ID */
+        gid_t cgid;     /* 创建者的有效组ID */
+        mode_t mode;    /* 访问模式 */
+        ...
+    };
+    ```
+
+#### 消息队列
+
++ 消息队列是消息的链接表，存放在内核中，并由消息队列ID标识。
+
++ 每个队列都有一个`msqid_ds`结构与其关联，这个结构定义了队列的当前状态：
+
+  ```c
+  struct msqid_ds {
+      struct ipc_perm    msg_perm;
+      msgqnum_t          msg_qnum;    /* 队列中的消息数 */
+      msglen_t           msg_qbytes;  /* 队列中消息的字节 */
+      pid_t              msg_lspid;   /* 最后调用msgsnd()的进程ID */
+      pid_t              msg_lrpid;   /* 最后调用msgrcv()的进程ID */
+      time_t             msg_stime;   /* 最后调用msgsnd()的时间 */ 
+      time_t             msg_rtime;   /* 最后调用msgrcv()的时间 */
+      time_t             msg_ctime;   /* 最后一次修改队列的时间 */
+      ...
+  };
+  ```
+
++ 创建或打开消息队列
+
+  ```c
+  #include <sys/types.h>
+  #include <sys/ipc.h>
+  #include <sys/msg.h>
+  
+  int msgget(key_t key, int msgflg);
+  ```
+
+  + `msgget`：创建一个新队列或打开一个现有队列
+    + key_t：创建IPC结构时需要指定一个键，作为IPC对象的外部名。键由内核转变成标识符
+    + 返回值：若成功，返回非负队列ID（标识符），该值可被用于其余几个消息队列函数
+
++ 操作消息队列
+
+  ```c
+  #include <sys/types.h>
+  #include <sys/ipc.h>
+  #include <sys/msg.h>
+  
+  int msgctl(int msqid, int cmd, struct msqid_ds *buf);
+  ```
+
+  + `msqid`：队列ID（标识符），`msgget`的返回值
+  + `cmd:`
+    + `IPC_STAT`：取此队列的msgid_qs结构，并存放在buf指向的结构中
+    + `IPC_SET`：将字段msg_perm.uid、msg_perm.gid、msg_perm.mode和msg_qbytes从Buf指向的结构赋值到这个队列的msqid_ds结构中（此命令只能由下列2种进程执行：1）其有效ID等于msg_perm.cuid或msg_perm.uid；2）具有超级用户特权的进程；只有超级用户才能增加msg_qbytes的值）
+    + `IPC_RMID`：从系统中删除消息队列以及仍在队列中的所有数据。这种删除立即生效。仍在使用这一消息队列的其它进程在他们下一次试图对此队列进行操作时，将得到`EIDRM`错误（此命令只能由下列2种进程执行：1）其有效ID等于msg_perm.cuid或msg_perm.uid；2）具有超级用户特权的进程）
+
++ 添加消息
+
+  ```c
+  int msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg);
+  ```
+
+  + `msgsnd`将新消息添加到队列尾端
+
+  + `ptr`：指向一个长整型数，它包含了正的整型消息类型，其后紧接着消息数据（若`nbytes`为0则无消息数据），因此，`ptr`可以是一个指向`mymesg`结构的指针
+
+    ```c
+    struct mymesg{
+        long mtype;         /* 正的长整型类型字段 */
+        char mtext[512];    /*  */
+    };
+    ```
+
+  + `nbytes`：消息数据的长度
+
++ 获取消息：
+
+  ```c
+  ssize_t msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msgflg);
+  ```
+
+  + `msgrcv`：从队列中取消息（并不一定要以先进先出的顺序取消息，也可以按类型字段取消息）
+
+#### 信号量
+
++ 信号量是一个**计数器**，用于为多个进程提供对**共享数据对象**的访问
+
++ 为了正确实现信号量，信号量值的测试及减1操作应当是原子操作。为此，信号量通常是在内核中实现的
+
++ 常用的信号量形式被称为二元信号量，它控制单个资源，其初始值为1。但是一般而言，信号量的初值可以是任意一个正值，该值表明有多少个共享资源单位可供共享应用
+
++ 下面的特性使得XSI信号量更复杂：
+
+  - 信号量并非是单个非负值，而必须定义为含有一个或多个信号量值的集合。当创建信号量时，要指定集合中信号量值的数量
+  - 信号量的创建是独立于它的初始化的。这是一个致命缺点。因此不能原子地创建一个信号量集合，并且对该集合中的各个信号量赋初值
+  - 即使没有进程正在使用各种形式的XSI IPC，他们仍然是存在的。有的程序在终止时并没有释放已经分配给它的信号量，我们不得不为这种程序担心
+
++ 获取信号量
+
+  ```c
+  #include <sys/types.h>
+  #include <sys/ipc.h>
+  #include <sys/sem.h>
+  
+  int semget(key_t key, int nsems, int semflg);
+  ```
+
+  + `key`：创建IPC结构时需要指定一个键，作为IPC对象的外部名。键由内核转变成标识符
+  + `nsems`：
+    + 该信号量集合中的信号量数如果是创建新集合（一般在服务器进程中），则必须指定nsems
+    + 如果是引用现有集合（一个客户进程），则将nsems指定为0
+  + 成功则返回信号量ID
+
++ 操作信号量
+
+  ```c
+  int semctl(int semid, int semnum, int cmd, ...);
+  ```
+
+  + `semun`：可选参数，是否使用取决于命令`cmd`，如果使用则类型是联合结构`semun`
+
+    ```c
+    union semun{
+        int             val;    /* for SETVAL */
+        struct semid_ds *buf;   /* for ICP_STAT and IPC_SET */
+        unsigned short  *array; /* for GETALL and SETALL */
+    };
+    ```
+
+#### 共享存储
+
++ mmap映射
+
+#### posix 信号量
+
++ POSIX信号量接口**使用更简单**：没有信号量集，在熟悉的文件系统操作后一些接口被模式化了
+
++ POSIX信号量在**删除时表现更完美**
+
+  ```c
+  #include <semaphore.h>
+  
+  sem_t *sem_open(const char *name, int oflag);
+  sem_t *sem_open(const char *name, int oflag, mode_t mode, unsigned int value);
+  
+  int sem_init(sem_t *sem, int pshared, unsigned int value);
+  
+  int sem_destroy(sem_t *sem);
+  int sem_close(sem_t *sem);
+  
+  int sem_wait(sem_t *sem);   // -1
+  int sem_trywait(sem_t *sem);
+  int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout);
+  
+  int sem_post(sem_t *sem); // + 1
+  ```
+
 ## 12. 网络
 
-## 13.内核同步机制
+## 13.内核同步机制 
 
 ### 13.1 [RCU](https://www.ibm.com/developerworks/cn/linux/l-rcu/index.html)
 
