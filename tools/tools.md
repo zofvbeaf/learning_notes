@@ -981,3 +981,18 @@ stap inodewatch.stp  0xfd 0x00 523170    # 主设备号, 辅设备号, inode号,
 :%s/\%x02/ /g
 ```
 
+### vim-godef
+
+```bash
+# bash
+go get -v github.com/rogpeppe/godef
+go install -v github.com/rogpeppe/godef
+
+# ~/.vimrc
+Plug 'dgryski/vim-godef'
+
+# ~/.vim/bundle/vim-godef/plugin/godef.vim
+autocmd FileType go nnoremap <buffer> gd :call GodefUnderCursor()<cr>
+autocmd FileType go nnoremap <buffer> <C-]> :call GodefUnderCursor()<cr>
+```
+

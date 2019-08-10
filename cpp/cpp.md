@@ -1,4 +1,4 @@
-## `关键字
+## 关键字
 
 ### volatile
 
@@ -660,6 +660,36 @@ iterator upper_bound( const Key& key ); // 返回指向首个大于 key 的元�
   ```
 
 + `vector`和`deque`只能用`itVec = Vec.erase(itVec);`，第二种不行，对于序列式容器(如`vector,``deque`)，删除当前的iterator会使后面所有元素的iterator都失效。这是因为vetor,deque使用了连续分配的内存，删除一个元素导致后面所有的元素会向前移动一个位置。还好erase方法可以返回下一个有效的iterator。
+
+#### string
+
+```c++
+// gcc-8.2.0/libstdc++-v3/include/bits/stringfwd.h  <string> Forward declarations
+typedef basic_string<char> string;
+
+// gcc-8.2.0/libstdc++-v3/include/bits/basic_string.h
+class basic_string {
+    struct _Rep_base {   // 24Byte
+        size_type   _M_length;
+        size_type   _M_capacity;
+        _Atomic_word _M_refcount; // 拷贝构造时，copy-on-write
+    };
+    struct _Rep : _Rep_base 
+    {
+      _CharT* _M_refdata() throw() //用来获取实际的数据的位置，即紧跟 _Rep的存储位置后面
+       { return reinterpret_cast<_CharT*>(this + 1); }
+
+      static _Rep* _S_create(size_type, size_type, const _Alloc&);
+    }
+    
+private:    
+    _Rep* p;
+};
+```
+
++ `basic_string.h`文件定义了`basic_string`模板类
++ `basic_string.tcc`存放了一些模板类的成员的实现。`c++`里面模板的实现不能放在`.cpp`文件中，必须写在头文件中，如果模板函数实现较复杂，就会导致头文件臃肿和杂乱，这里可以看到`stl`里面方法，就是把较复杂的实现放在`.tcc`文件里面，然后当做头文件来包含
++ 
 
 ## c++11
 
