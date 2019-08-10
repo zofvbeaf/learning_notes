@@ -1,6 +1,7 @@
 ## leveldb
 
 + 写性能十分优秀，基于`LSM(Log Structured-Merge Tree)`树实现，`LSM`树的核心思想就是放弃部分读的性能，换取最大的写入能力。
++ `LevelDB` 是对 `Bigtable` 论文中描述的键值存储系统的单机版的实现，它提供了一个极其高速的键值存储系统，并且由`Bigtable` 的作者 [Jeff Dean](https://research.google.com/pubs/jeff.html) 和 [Sanjay Ghemawat](https://research.google.com/pubs/SanjayGhemawat.html) 共同完成，可以说高度复刻了 `Bigtable` 论文中对于其实现的描述。
 + `LSM`树写性能极高的原理，简单地来说就是尽量减少随机写的次数。对于每次写入操作，并不是直接将最新的数据驻留在磁盘中，而是将其拆分成两步：
   + 一次日志文件的顺序写
   + 一次内存中的数据插入
@@ -56,6 +57,30 @@
 
   + 通过这些信息，`leveldb`便可以在启动时，基于一个空的`version`，不断`apply`这些记录，最终得到一个上次运行结束时的版本信息。
 
+### 写入流程
+
++ 调用 `MakeRoomForWrite` 方法为即将进行的写入提供足够的空间；
+  + 在这个过程中，由于 `memtable` 中空间的不足可能会冻结当前的 `memtable`，发生 `Minor Compaction` 并创建一个新的 `MemTable` 对象；
+  + 在某些条件满足时，也可能发生 `Major Compaction`，对数据库中的 `SSTable` 进行压缩；
++ 通过 `AddRecord` 方法向日志中追加一条写操作的记录；
++ 再向日志成功写入记录后，我们使用 `InsertInto` 直接插入 `memtable` 中，完成整个写操作的流程；
+
+### 实现
+
++ `Put`
+  + `WriteBatch -> WriteBatchInternal`
+  + `WriteBatch->rep_`的`header`为`12B`，`seq_number(8B)count(4B)kTypeValue(1B)key_len(最多5B)key()value_len(最多5B)value()`
+
+### 其它
+
+```c++
+inline uint32_t DecodeFixed32(const char* ptr) {
+	uint32_t result;
+	memcpy(&result, ptr, sizeof(result));  // gcc optimizes this to a plain load
+    return result;
+}
+```
+
 ## Bigtable
 
 ### 基本概念
@@ -95,7 +120,10 @@
 + `BigTable` 内部存储数据的文件是 `Google SSTable` 格式的。`SSTable` 是一个持久化的、排序的、不可更改的
   `Map` 结构，而 `Map` 是一个 `key-value` 映射的数据结构，`key` 和 `value` 的值都是任意的 `Byte` 串。
 
-  + 可以对 `SSTable`进行如下的操作：查询与一个 `key` 值相关的 `value`，或者遍历某个 `key` 值范围内的所有的 `key-value` 对。从内部看，`SSTable` 是一系列的数据块（通常每个块的大小是 `64KB`，这个大小是可以配置的）。`SSTable` 使用块索引（通常存储在 `SSTable` 的最后）来定位数据块；在打开 `SSTable` 的时候，索引被加载到内存。每次查找都可以通过一次磁盘搜索完成：首先使用二分查找法在内存中的索引里找到数据块的位置，然后再从硬盘读取相应的数据块。也可以选择把整个 `SSTable` 都放在内存中，这样就不必访问硬盘了。
+  + 可以对 `SSTable`进行如下的操作：查询与一个 `key` 值相关的 `value`，或者遍历某个 `key` 值范围内的所有的 `key-value` 对。
+  + 从内部看，`SSTable` 是一系列的数据块（通常每个块的大小是 `64KB`，这个大小是可以配置的）。
+  + `SSTable` 使用块索引（通常存储在 `SSTable` 的最后）来定位数据块；
+  + 在打开 `SSTable` 的时候，索引被加载到内存。每次查找都可以通过一次磁盘搜索完成：首先使用二分查找法在内存中的索引里找到数据块的位置，然后再从硬盘读取相应的数据块。也可以选择把整个 `SSTable` 都放在内存中，这样就不必访问硬盘了。
 
 + `BigTable` 还依赖一个高可用的、序列化的分布式锁服务组件，叫做 `Chubby`。
 
@@ -206,5 +234,30 @@
   + 如果我们把对每个 `Tablet` 的操作的 `Commit` 日志都存在一个单独的文件的话，那么就会产生大量的文件，并且这些文件会并行的写入 `GFS`。根据 `GFS` 服务器底层文件系统实现的方案，要把这些文件写入不同的磁盘
     日志文件时 ，会有大量的磁盘 `Seek` 操作。
   + 设置每个 `Tablet` 服务器一个 `Commit` 日志文件，把修改操作的日志以追加方式写入同一个日志文件，因此一个实际的日志文件中混合了对多个 `Tablet` 修改的日志记录。
-  + 使用单个日志显著提高了普通操作的性能，但是将恢复的工作复杂化了。当一个 `Tablet` 服务器宕机时，它加载的 `Tablet` 将会被移到很多其它的 `Tablet` 服务器上：每个 `Tablet` 服务器都装载很少的几个原来的服务器的 `Tablet`。当恢复一个 `Tablet` 的状态的时候，新的 `Tablet` 服务器要从原来的 `Tablet` 服务器写的日志中提取修改操作的信息，并重新执行。然而，这些 `Tablet` 修改操作的日志记录都混合在同一个日志文件中的。一种方法新的 `Tablet` 服务器读取完整的 `Commit` 日志文件，然后只重复执行它需要恢复的 `Tablet` 的相关修改操作。使用这种方法，假如有 `100` 台 `Tablet` 服务器，每台都加载了失效的 `Tablet` 服务器上的一个 `Tablet`，那么，这个日志文件就要被读取 `100` 次（每个服务器读取一次）。
-  + 为了避免多次读取日志文件，我们首先把日志按照关键字（`table`，`row name`，`log sequence number`）排序。排序之后，对同一个 `Tablet` 的修改操作的日志记录就连续存放在了一起，因此，我们只要一次磁盘 `Seek` 操作、之后顺序读取就可以了。为了并行排序，我们先将日志分割成 `64MB` 的段，之后在不同的 `Tablet` 服务器对段进行并行排序。这个排序工作由 `Master` 服务器来协同处理，并且在一个 `Tablet` 服务器表明自己需要从 `Commit`日志文件恢复 `Tablet` 时开始执行。
+  + 使用单个日志显著提高了普通操作的性能，但是将恢复的工作复杂化了。
+    + 当一个 `Tablet` 服务器宕机时，它加载的 `Tablet` 将会被移到很多其它的 `Tablet` 服务器上：每个 `Tablet` 服务器都装载很少的几个原来的服务器的 `Tablet`。
+    + 当恢复一个 `Tablet` 的状态的时候，新的 `Tablet` 服务器要从原来的 `Tablet` 服务器写的日志中提取修改操作的信息，并重新执行。
+    + 然而，这些 `Tablet` 修改操作的日志记录都混合在同一个日志文件中的。
+    + 一种方法是新的 `Tablet` 服务器读取完整的 `Commit` 日志文件，然后只重复执行它需要恢复的 `Tablet` 的相关修改操作。
+      + 使用这种方法，假如有 `100` 台 `Tablet` 服务器，每台都加载了失效的 `Tablet` 服务器上的一个 `Tablet`，那么，这个日志文件就要被读取 `100` 次（每个服务器读取一次）。
+  + 为了避免多次读取日志文件
+    + 我们首先把日志按照关键字（`table`，`row name`，`log sequence number`）排序。
+    + 排序之后，对同一个 `Tablet` 的修改操作的日志记录就连续存放在了一起，因此，我们只要一次磁盘 `Seek` 操作、之后顺序读取就可以了。
+    + 为了并行排序，我们先将日志分割成 `64MB` 的段，之后在不同的 `Tablet` 服务器对段进行并行排序。
+    + 这个排序工作由 `Master` 服务器来协同处理，并且在一个 `Tablet` 服务器表明自己需要从 `Commit`日志文件恢复 `Tablet` 时开始执行。
+  + 在向 `GFS` 中写 `Commit` 日志的时候可能会引起系统颠簸
+    + 原因是多种多样的（比如，写操作正在进行的时候，一个 `GFS` 服务器宕机了；或者连接三个 `GFS` 副本所在的服务器的网络拥塞或者过载了）。
+    + 为了确保在`GFS` 负载高峰时修改操作还能顺利进行，每个 `Tablet` 服务器实际上有两个日志写入线程，每个线程都写自己的日志文件，并且在任何时刻，只有一个线程是工作的。
+    + 如果一个线程的在写入的时候效率很低，`Tablet` 服务器就切换到另外一个线程，修改操作的日志记录就写入到这个线程对应的日志文件中。
+    + 每个日志记录都有一个序列号，因此，在恢复的时候，`Tablet` 服务器能够检测出并忽略掉那些由于线程切换而导致的重复的记录。
+  + `Tablet` 恢复提速
+    + 当 `Master` 服务器将一个 `Tablet` 从一个 `Tablet` 服务器移到另外一个 `Tablet` 服务器时，源 `Tablet` 服务器会对这个 `Tablet` 做一次 `Minor Compaction`。
+    + 这个 `Compaction` 操作减少了 `Tablet` 服务器的日志文件中没有归并的记录，从而减少了恢复的时间。
+    + `Compaction` 完成之后，该服务器就停止为该 `Tablet` 提供服务。在卸载 `Tablet` 之前，源 `Tablet` 服务器还会再做一次（通常会很快）`Minor Compaction`，以消除前面在一次压缩过程中又产生的未归并的记录。第二次 `Minor Compaction` 完成以后，`Tablet` 就可以被装载到新的 `Tablet` 服务器上了，并且不需要从日志中进行恢复。
+  + 利用不变性
+    + 我们在使用 `Bigtable` 时，除了 `SSTable` 缓存之外的其它部分产生的 `SSTable` 都是不变的，我们可以利用这一点对系统进行简化。
+    + 例如，当从 `SSTable` 读取数据的时候，我们不必对文件系统访问操作进行同步。这样一来，就可以非常高效的实现对行的并行操作。
+    + `memtable` 是唯一一个能被读和写操作同时访问的可变数据结构。为了减少在读操作时的竞争，我们对内存表采用 `COW(Copy-on-write)`机制，这样就允许读写操作并行执行。
+    + 因为 `SSTable` 是不变的，因此，我们可以把永久删除被标记为*删除*的数据的问题，转换成对废弃的`SSTable` 进行垃圾收集的问题了。
+    + 每个 `Tablet` 的 `SSTable` 都在 `METADATA` 表（保存了 `Root SSTable`的集合）中注册了。`Master` 服务器采用**标记-删除**的垃圾回收方式删除 `SSTable` 集合中废弃的 `SSTable`。
+    + `SSTable` 的不变性使得分割 `Tablet` 的操作非常快捷。我们不必为每个分割出来的 `Tablet` 建立新的 `SSTable` 集合，而是共享原来的 `Tablet` 的 `SSTable` 集合。
