@@ -619,6 +619,10 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 +  **硬件性能对比，包括cache，读写速度**
 + **系统调用过程中被抢占**？
 
+### 进程调度
+
++ 
+
 ## 5.  地址空间
 
 > **0000000000000000 - 00007fffffffffff (=47 bits) user space, different per mm**

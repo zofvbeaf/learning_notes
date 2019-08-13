@@ -59,6 +59,7 @@
 
 ### 写入流程
 
++ 其实`leveldb`仍然存在写入丢失的隐患。在写完日志文件以后，操作系统并不是直接将这些数据真正落到磁盘中，而是暂时留在操作系统缓存中，因此当用户写入操作完成，操作系统还未来得及落盘的情况下，发生系统宕机，就会造成写丢失；但是若只是进程异常退出，则不存在该问题。
 + 调用 `MakeRoomForWrite` 方法为即将进行的写入提供足够的空间；
   + 在这个过程中，由于 `memtable` 中空间的不足可能会冻结当前的 `memtable`，发生 `Minor Compaction` 并创建一个新的 `MemTable` 对象；
   + 在某些条件满足时，也可能发生 `Major Compaction`，对数据库中的 `SSTable` 进行压缩；
@@ -71,6 +72,29 @@
   + `WriteBatch -> WriteBatchInternal`
   + `WriteBatch->rep_`的`header`为`12B`，`seq_number(8B)count(4B)kTypeValue(1B)key_len(最多5B)key()value_len(最多5B)value()`
 
+#### options
+
++ `Comparator`
+
+  + `BytewiseComparator`
+    + 调`slice`的`compare`，内部用`memcmp`比较两个，其内部实现为转换为`long int`进行比较
+
++ `Block`的布局
+
+  ```bash
+  # Entry:
+  # (shared key length | unshared key length | value length | unshared key content | value)
+  Entry1 
+  Entry2
+  ...
+  EntryN
+  RestartPoint1
+  RestartPoint2
+  ...
+  RestartPointN
+  NumOfRestartPoint(4B)
+  ```
+
 ### 其它
 
 ```c++
@@ -80,6 +104,108 @@ inline uint32_t DecodeFixed32(const char* ptr) {
     return result;
 }
 ```
+
++  `GUARDED_BY`
+
+  + 用户只要在自己的代码中用 `GUARDED_BY` 表明哪个成员变量是被哪个 `mutex` 保护的（用法见下图），就可以让 `clang` 帮你检查有没有遗漏加锁的情况了
+
++ `assert_exclusive_lock`
+
+  + `Clang`的线程安全分析模块是`C++`语言的一个扩展，能对代码中潜在的竞争条件进行警告。这种分析是完全静态的（即编译时进行），没有运行时的消耗
+
++ `port/thread_annotations.h`：`clang`的线程安全分析。
+
++ `Status`
+
+  ```c++
+  state_[0..3] == length of message
+  state_[4]    == code
+  state_[5..]  == message
+  ```
+
++ `level`范围为`0~6`
+
++ `DB`的默认`env`为`PosixEnv`
+
++ `strerror`返回`errno`对应的错误消息
+
++ `block`的大小可调，读大量数据时可能调大点，小数据量时可能调小点，但是小于~或大于几`M`就没什么提升，大量数据可以通过压缩获得性能提升
+
++ 批量读数据时可以设置`options.fill_cache = false;`来避免缓存被替换。
+
++ 可以把经常访问的相邻的`key`放在一起
+
++ `options.filter_policy = NewBloomFilterPolicy(10);`可以用来减少读磁盘的开销，同时也可以减少加载到内存中的数据的数量
+
++ `db->GetApproximateSizes(ranges, 2, sizes);`可获得指定范围内数据量大小的估计
+
++ 日志文件默认到达`1M`就会转为`level-0`的`sorted table`即`*.ldb`，并且新建一个日志文件和`memtable`
+
+  + 在后台
+    + 把之前的`memtable`写入一个`sstable`
+    + 丢弃原来的`memtable`
+    + 删除旧的日志文件和旧的`memtable`
+    + 把新的`sstable`添加到`level-0`
+
++ 当`level-0`的表到达`4`个就会和所有范围重叠的`level-1`（每`2M`的数据生成一个）的文件进行合并
+
++ `MANIFEST`中存储了各层的`sorted table`的元数据
+
++ `level-0`的`sstable`的值域可能会重叠，`level-0`到`level-1`的`compaction`可能会拿多个`level-0`的`sstable`
+
++ `level-L`和`level-L+1`做`compaction`的时候当`sstable`的大小到达`2M`或者当前文件的值域超过了`10`个`level-L+2`的文件会转而生成新的`level-L+1`的`sstable`（为确保`level-L+1`到`level-L+2`的合并不会取太多数据）
+
+  + 做`compaction`的时候会丢弃`overwritten`的`value`
+  + 如果某个值上有删除标记且在更高层的`level`中没有出现，那么也可以直接丢弃
+
++ 一般来说做`compaction`的时候可能会读`12`个`2M`的文件，`10+2`（`level-L`的文件值域范围并不和`level-L+1`完全对齐）
+
++ 当因为写的速率较慢等原因导致`level-0`的文件比较多时，可以通过如下方法解决
+
+  + 增大日志切换的阈值大小，日志大小达到一定程度时切换
+  + 人为降低写速率
+
++ 恢复
+
+  + 读`CURRENT`去找到最近提交的`MANIFEST`，删除所有过期的文件，把`log chunk`转为一个新的`level-0 sstable`
+  + 根据恢复的序列开始写一个新的日志文件
+
++ 垃圾文件收集
+
+  + 每次文件的`compaction`末尾和恢复的末尾都会调用`DeleteObsoleteFiles()`
+    + 它会找到数据库中的所有文件名，然后删除所有非`current log file`的日志文件
+    + 删除所有的为引用且非`compaction`涉及到的表文件
+
++ `InternalKey`
+
+  + `db` 内部，包装易用的结构，包含 `userkey` 与 `SequnceNumber/ValueType`
+
++ `LookupKey`
+
+  + 对 `memtable` 进行 `lookup` 时使用 `[start,end]`, 对 `sstable lookup` 时使用`[kstart, end]`
+
++ `protobuf`的`Base 128 Varints`，即对数字进行压缩
+
+  ```bash
+  10101100 00000010 -> 0101100 0000010 -> 0000010 0101100 -> 100101100 = 300
+  # 单个字节最高位为 1 表示还有数据
+  ```
+
++ 读文件调用`pread`，可以指定从文件某偏移处开始读，写是追加写，直接调用`write`，刷`MANIFEST`调用`fsync`，刷数据缓存调用的是`fdatasync`
+
++ 对数据库的加锁是通过对文件`dbname/LOCK`调用flock进行加锁实现的
+
++ `level-0` 中的 `sstable` 是由 `memtable` 直接 `dump` 得到
+
++ 做`compaction`是在调用`MaybeScheduleCompaction`的时候创建线程做的
+
++ `sstable`大小最大默认`2M`
+
++ `compaction`的均衡参数`compaction_score_`
+
++ 整个 `db` 的当前状态被 `VersionSet` 管理着，其中有当前最新的 `Version` 以及其他正在服务的 `Version`链表；全局的 `SequnceNumber`，`FileNumber`；当前的 `manifest_file_number`; 封装 `sstable` 的`TableCache`。 每个 `level` 中下一次 `compact` 要选取的 `start_key` 等等
+
++ `compact` 过程中会有一系列改变当前 `Version` 的操作（`FileNumber` 增加，删除 `input` 的 `sstable`，增加输出的 `sstable`……），为了缩小 `Version` 切换的时间点，将这些操作封装成 `VersionEdit`，`compact`完成时，将 `VersionEdit` 中的操作一次应用到当前 `Version` 即可得到最新状态的 `Version`
 
 ## Bigtable
 
