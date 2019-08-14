@@ -738,6 +738,13 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
   
 + 写未开启写的`fd`会返回`EBADF`
 
++ `FILE * fdopen(int fd, const char * mode)`和`int fileno(FILE *stream);`
+
+  + `FILE`是对`fd`的封装
+  + `fclose`在关闭文件指针的时候，内部其实也关闭了文件描述符
+
++ `freopen("a.in","r",stdin);`输入重定向
+
 ###  socketfd
 
 + `int socket(int domain, int type, int protocol);`返回一个fd。

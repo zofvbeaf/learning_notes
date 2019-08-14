@@ -68,7 +68,22 @@
 
 ### 实现
 
++ `DB::Open`
+  
+  + `leveldb::DB::Open(options, "testdb", &db)`
+  
+    ```c++
+    Status DB::Open(const Options& options, const std::string& dbname,
+                    DB** dbptr) {
+    	DBImpl* impl = new DBImpl(options, dbname);                
+    }
+    ```
+  
+    + `DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)`
+      + 新建`TableCache`和`VersionSet`
+  
 + `Put`
+  
   + `WriteBatch -> WriteBatchInternal`
   + `WriteBatch->rep_`的`header`为`12B`，`seq_number(8B)count(4B)kTypeValue(1B)key_len(最多5B)key()value_len(最多5B)value()`
 
@@ -79,21 +94,219 @@
   + `BytewiseComparator`
     + 调`slice`的`compare`，内部用`memcmp`比较两个，其内部实现为转换为`long int`进行比较
 
-+ `Block`的布局
++ `write_buffer_size`默认为`4M`
 
-  ```bash
-  # Entry:
-  # (shared key length | unshared key length | value length | unshared key content | value)
-  Entry1 
-  Entry2
-  ...
-  EntryN
-  RestartPoint1
-  RestartPoint2
-  ...
-  RestartPointN
-  NumOfRestartPoint(4B)
++ `env`默认为`PosixEnv`
+
++ `max_file_size`默认为`2M`
+
+  ```c++
+  Options::Options()
+      : comparator(BytewiseComparator()),
+        create_if_missing(false),
+        error_if_exists(false),
+        paranoid_checks(false),
+        env(Env::Default()),
+        info_log(nullptr),
+        write_buffer_size(4<<20),
+        max_open_files(1000),
+        block_cache(nullptr),
+        block_size(4096),
+        block_restart_interval(16),
+        max_file_size(2<<20),
+        compression(kSnappyCompression),
+        reuse_logs(false),
+        filter_policy(nullptr) {
+  }
   ```
+
+#### sstable
+
++ `sstable`大小最大默认`2M`，数据按`Block`划分，每个块大小为`4kB`
+
++ 每个`block`的尾部有`5B`用于存储：`1-byte type + 32-bit crc`
+
+  - `type`指示是`kNoCompression`还是`kSnappyCompression`等等
+  
+  ![](https://ws1.sinaimg.cn/large/77451733gy1g5ywkkb3nxj210s0pidjj.jpg)
+
+##### data block
+
++ `data block`中存储的数据是`leveldb`中的`key value`键值对。其中一个`data block`中的数据部分（不包括压缩类型、`CRC`校验码）按逻辑又以下图进行划分：
+
+  ![](https://ws1.sinaimg.cn/large/77451733gy1g5ywnnbw1tj20dz0ha75l.jpg)
+
+  + 第一部分用来存储`key-value`数据。由于`sstable`中所有的`key-value`对都是严格按序存储的，用了节省存储空间，`leveldb`并不会为每一对`key-value`对都存储完整的`key`值，而是存储与**上一个key非共享的部分**，避免了`key`重复内容的存储。
+
+  + 每间隔若干个`keyvalue`对，将为该条记录重新存储一个完整的`key`。重复该过程（默认间隔值为16），每个重新存储完整`key`的点称之为`Restart point`。
+
+  + 每个数据项的格式如下图所示：
+
+    ![](https://ws1.sinaimg.cn/large/77451733gy1g5ywo0rm75j21sy05iabt.jpg)
+
+    + 与前一条记录`key`共享部分的长度；
+    + 与前一条记录`key`不共享部分的长度；
+    + `value`长度；
+    + 与前一条记录`key`非共享的内容；
+    + `value`内容（`key`和`value`连续存储，根据前面的偏移划分）；
+
+##### filter block
+
++ 为了加快`sstable`中数据查询的效率，在直接查询`datablock`中的内容之前，`leveldb`首先根据`filter block`中的过滤数据（这些过滤数据一般指代布隆过滤器的数据）判断指定的`datablock`中是否有需要查询的数据，若判断不存在，则无需对这个`datablock`进行数据查找
+
+  ![](https://ws1.sinaimg.cn/large/77451733gy1g5ywr5v50ej213i0s0q71.jpg)
+
+  + `filter block`存储的数据主要可以分为两部分：
+    + 过滤数据
+    + 索引数据
+  + `Base Lg`默认值为`11`，表示每`2KB`的数据，创建一个新的过滤器来存放过滤数据
+  + 一个`sstable`只有一个`filter block`，其内存储了所有`block`的`filter`数据. 具体来说，`filter_data_k` 包含了所有起始位置处于 `[base*k, base*(k+1)]`范围内的`block`的`key`的集合的`filter`数据，按数据大小而非`block`切分主要是为了尽量均匀，以应对存在一些`block`的`key`很多，另一些`block`的`key`很少的情况
+
+##### meta index block
+
++ `meta index block`用来存储`filter block`在整个`sstable`中的索引信息
++ 只存储一条记录：
+  + 该记录的`key`为：`filter.`与过滤器名字组成的常量字符串
+  + 该记录的`value`为：`filter block`在`sstable`中的索引信息序列化后的内容，索引信息包括：
+    + 在`sstable`中的偏移量
+    + 数据长度
+
+##### index block
+
++ 与`meta index block`类似，`index block`用来存储所有`data block`的相关索引信息
+
++ 源码中对应的数据结构也为`Block`
+
++ `index block`包含若干条记录，每一条记录代表一个`data block`的索引信息，一条索引包括以下内容：
+
+  + `data block i` 中最大的`key`值；
+  + 该`data block`起始地址在`sstable`中的偏移量；
+  + 该`data block`的大小；
+
+  ![](https://ws1.sinaimg.cn/large/77451733gy1g5yxu3jdunj20q50m376x.jpg)
+
++ 依次比较`index block`中记录信息的`key`值即可实现快速定位目标数据在哪个`data block`中
+
+##### footer
+
++ 大小固定，为`48`字节，用来存储`meta index block`与`index block`在`sstable`中的索引信息，另外尾部还会存储一个`magic word`，内容为："http://code.google.com/p/leveldb/"字符串`sha1`哈希的前`8`个字节
+
++ 前两个`index`在内部实现为`BlockHandle`即包含`size`和`offset`两个`8B`的数，每个`8B`编码为`variant`的话需要`ceil(64/7) = 10B`，所以总共需要`10*4+8= 48B`
+
+  ![](https://ws1.sinaimg.cn/large/77451733gy1g5yz3oajuhj20bk07ugm6.jpg)
+
+##### Table::Open
+
++ 先读出`48B`的`footer`
++ 之后根据`footer`中的`index block's inex`读出`index block`，传进来的为`RandomAccessFile`，其读取通过`pread`实现。
++ 之后`*table = new Table(rep);`，将结果`Table`传给传递进来的参数。
++ `(*table)->ReadMeta(footer);`：读取`meta index block`
++ 通过`meta index block`找到`filter block`并调用`ReadFilter()`读取
++ 读到`filter block`后调用`rep_->filter = new FilterBlockReader()`创建`FilterBlockReader`存入`Table::rep_`中
+
+#### DB::Open
+
++ `new DBImpl`
+
+  + `SanitizeOptions`
+  
+    + 检查用户输入的option的范围，创建名为`dbname`的目录，将原来存在的`dbname/LOG`文件重命名为`dbname/LOG.old`，并新建名为`dbname/LOG`的日志文件，对应的内部数据类型为 `PosixLogger`，内部调用`vsnprintf`打印日志信息，每次写日志都会调用`std::fwrite`和`std::fflush`
+    + `Options::info_log`指向了新建的 `PosixLogger`，如果原本`Options::info_log`不为空，则不会执行新建`LOG`文件等操作
+    + 若`Options::block_cache == nullptr`则会新建一个`8M`的`LRUCache`，使其指向它
+  + `new TableCache`
+    + `cache`条数为`Options::max_open_files - kNumNonTableCacheFiles;`即`5000-10=4990`个。
+    + `TableCache`即用`LRUCache`缓存`Table`
+  + `new VersionSet`
+    + `next_file_number_`直接设定为`2`
+    + 创建一个`dummy_version`作为`version`链表头
+    + `AppendVersion(new Version(this));`
+      + `current_` 指向此新生成的`version`
+      + 永远是`dummy_version`的`pre`为最新的`version`
++ `VersionEdit edit;`
++ `DBImpl::Recover`
+  + 先对`dbname/LOCK`文件加锁，对文件的加锁通过`fcntl(fd, F_SETLK, &f);`实现
+  + 找到`dbname/CURRENT`之后根据`MANIFEST`文件等恢复数据
++ 
+
+#### 缓存系统
+
++ 缓存对于一个数据库读性能的影响十分巨大，倘若`leveldb`的每一次读取都会发生一次磁盘的`IO`，那么其整体效率将会非常低下
+
++ `Leveldb`中使用了一种基于`LRUCache`的缓存机制，用于缓存：
+
+  + 已打开的`sstable`文件对象和相关元数据；
+  + `sstable`中的`dataBlock`的内容；
+
++ 使得在发生读取热数据时，尽量在`cache`中命中，避免`IO`读取。在介绍如何缓存、利用这些数据之前，我们首先介绍一下`leveldb`使用的`cache`是如何实现的
+
+  ![](https://ws1.sinaimg.cn/large/77451733gy1g5z0mhgd8fj21bm0z8jxs.jpg)
+
++ 其中`Hash table`是基于`Yujie Liu`等人的论文`《Dynamic-Sized Nonblocking Hash Table》`实现的，用来存储数据。由于hash表一般需要保证插入、删除、查找等操作的时间复杂度为 O(1)
+
+  + 当`hash`表的数据量增大时，为了保证这些操作仍然保有较为理想的操作效率，需要对`hash`表进行`resize`，即改变`hash`表中`bucket`的个数，对所有的数据进行重散列。
+  + 基于该文章实现的`hash table`可以实现`resize`的过程中**不阻塞其他并发的读写请求**。
+
++ `LRU`中则根据`Least Recently Used`原则进行数据新旧信息的维护，当整个`cache`中存储的数据容量达到上限时，便会根据`LRU`算法自动删除最旧的数据，使得整个`cache`的存储容量保持一个常量。
+
++ `Dynamic-sized NonBlocking Hash table`
+
+  + 在`hash`表进行`resize`的过程中，保持`Lock-Free`是一件非常困难的事
+
+  + 一个`hash`表通常由若干个`bucket`组成，每一个`bucket`中会存储若干条被散列至此的数据项。当`hash`表进行`resize`时，需要将“旧”桶中的数据读出，并且重新散列至另外一个“新”桶中。假设这个过程不是一个原子操作，那么会导致此刻其他的读、写请求的结果发生异常，甚至导致数据丢失的情况发生
+
+  + 因此，`liu`等人提出了一个新颖的概念：**一个bucket的数据是可以冻结的**。
+
+  + 这个特点极大地简化了`hash`表在`resize`过程中在不同`bucket`之间转移数据的复杂度。
+
+    ![](https://ws1.sinaimg.cn/large/77451733gy1g5z164nktwj21my144grh.jpg)
+
+  + 该哈希表的散列与普通的哈希表一致，都是借助散列函数，将用户需要查找、更改的数据散列到某一个哈希桶中，并在哈希桶中进行操作。
+
+  + 由于一个哈希桶的容量是有限的（一般不大于`32`个数据），因此在哈希桶中进行插入、查找的时间复杂度可以视为是常量的。
+
+  + **扩大**
+
+    ![](https://ws1.sinaimg.cn/large/77451733gy1g5z19m9r2ij21tw1bgdqp.jpg)
+
+    + 当`cache`中维护的数据量太大时，会发生哈希表扩张的情况。以下两种情况是为`cache`中维护的数据量过大：
+      + 整个`cache`中，数据项（`node`）的个数超过预定的阈值（默认初始状态下哈希桶的个数为`16`个，每个桶中可存储`32`个数据项，即总量的阈值为哈希桶个数乘以每个桶的容量上限）；
+      + 当`cache`中出现了数据不平衡的情况。当某些桶的数据量超过了`32`个数据，即被视作数据发生散列不平衡。当这种不平衡累积值超过预定的阈值（`128`）个时，就需要进行扩张；
+    + 一次扩张的过程为：
+      + 计算新哈希表的哈希桶个数（扩大一倍）；
+      + 创建一个空的哈希表，并将旧的哈希表（主要为所有哈希桶构成的数组）转换一个“过渡期”的哈希表，表中的每个哈希桶都被“冻结”；
+      + 后台利用“过渡期”哈希表中的“被冻结”的哈希桶信息对新的哈希表进行内容构建；
+    + **值得注意的是，在完成新的哈希表构建的整个过程中，哈希表并不是拒绝服务的，所有的读写操作仍然可以进行**。
+    
+  + **哈希表扩张过程中，最小的封锁粒度为哈希桶级别**。
+  
+    + 当有新的读写请求发生时，若被散列之后得到的哈希桶仍然未构建完成，则“主动”进行构建，并将构建后的哈希桶填入新的哈希表中。后台进程构建到该桶时，发现已经被构建了，则无需重复构建。
+    + 因此如上图所示，哈希表扩张结束，哈希桶的个数增加了一倍，于此同时仍然可以对外提供读写服务，仅仅需要哈希桶级别的封锁粒度就可以保证所有操作的一致性跟原子性。
+  
+  + **构建哈希桶**
+  
+    + 当哈希表扩张时，构建一个新的哈希桶其实就是将一个旧哈希桶中的数据拆分成两个新的哈希桶。
+    + 拆分的规则很简单。由于一次散列的过程为：
+      + 利用散列函数对数据项的`key`值进行计算；
+      + 将第一步得到的结果取哈希桶个数的余，得到哈希桶的`ID`；
+    + 因此拆分时仅需要将数据项`key`的散列值对新的哈希桶个数取余即可。
+  
+  + **缩小**
+    + 当哈希表中数据项的个数少于哈希桶的个数时，需要进行收缩。
+    + 收缩时，哈希桶的个数变为原先的一半，`2`个旧哈希桶的内容被合并成一个新的哈希桶，过程与扩张类似，在这里不展开详述。
+
+#### 布隆过滤器
+
++ `Bloom Filter`是一种空间效率很高的随机数据结构，它利用位数组很简洁地表示一个集合，并能判断一个元素是否属于这个集合。`Bloom Filter`的这种高效是有一定代价的：在判断一个元素是否属于某个集合时，有可能会把不属于这个集合的元素误认为属于这个集合（`false positive`）
+
++ `leveldb`中利用布隆过滤器判断指定的`key`值是否存在于`sstable`中，若过滤器表示不存在，则该`key`一定不存在，由此加快了查找的效率
+
++ `bloom`过滤器底层是一个位数组，初始时每一位都是0
+
+  ![](https://ws1.sinaimg.cn/large/77451733gy1g5ywylt3ktj208601bq2r.jpg)
+
++ 当插入值`x`后，分别利用`k`个哈希函数（图中为3）利用`x`的值进行散列，并将散列得到的值与`bloom`过滤器的容量进行取余，将取余结果所代表的那一位值置为`1`
+
++ ![](https://ws1.sinaimg.cn/large/77451733gy1g5ywzj61mvj208801vq2s.jpg)
 
 ### 其它
 
@@ -199,13 +412,13 @@ inline uint32_t DecodeFixed32(const char* ptr) {
 
 + 做`compaction`是在调用`MaybeScheduleCompaction`的时候创建线程做的
 
-+ `sstable`大小最大默认`2M`
-
 + `compaction`的均衡参数`compaction_score_`
 
 + 整个 `db` 的当前状态被 `VersionSet` 管理着，其中有当前最新的 `Version` 以及其他正在服务的 `Version`链表；全局的 `SequnceNumber`，`FileNumber`；当前的 `manifest_file_number`; 封装 `sstable` 的`TableCache`。 每个 `level` 中下一次 `compact` 要选取的 `start_key` 等等
 
 + `compact` 过程中会有一系列改变当前 `Version` 的操作（`FileNumber` 增加，删除 `input` 的 `sstable`，增加输出的 `sstable`……），为了缩小 `Version` 切换的时间点，将这些操作封装成 `VersionEdit`，`compact`完成时，将 `VersionEdit` 中的操作一次应用到当前 `Version` 即可得到最新状态的 `Version`
+
++ `TableCache`内部使用`LRUCache`缓存所有的`table`对象，实际上其内容是文件编号`{file number, TableAndFile*}`
 
 ## Bigtable
 
