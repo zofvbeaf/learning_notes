@@ -650,9 +650,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     + 用户态显然不可以访问内核空间，但是内核态下也不一定就能访问用户空间。这与CPU的配置有关，规则很复杂，可以参考Intel手册卷三4.6节，这里提一个关键字SMAP，有兴趣可以自行搜索，在较新的内核版本中，这一机制已经被使用。
     + 关于[vdso和vvar](http://readm.tech/2016/09/23/syscall/)：主要将部分安全的内核代码映射到用户空间，这使得程序可以不进入内核态直接调用系统调用。
 
-    ![1560844894694](http://ww1.sinaimg.cn/large/77451733gy1g4fwys48n0j210s0k646v.jpg)
-
-    + 线性地址空间划分如上图所示。内核空间的划分是确定的，写在内核代码中的，而用户态的空间在可执行文件被装载时才知道，由装载器和链接器来决定（可能需要参考elf相关的文档，才知道具体的装载位置）。不过，用户态空间整体的布局如上图所示，内核的current->mm结构体中记录着相关段的位置。
+    + 线性地址空间划分如图所示。内核空间的划分是确定的，写在内核代码中的，而用户态的空间在可执行文件被装载时才知道，由装载器和链接器来决定（可能需要参考elf相关的文档，才知道具体的装载位置）。不过，用户态空间整体的布局如上图所示，内核的current->mm结构体中记录着相关段的位置。
 + [`task_struct`](<https://elixir.bootlin.com/linux/v4.18/source/include/linux/sched.h#L593>)
 
 + [`thread_info`](https://blog.csdn.net/gatieme/article/details/51577479)
@@ -754,6 +752,8 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 ![](https://ws1.sinaimg.cn/large/77451733gy1g5onviw5jzj21cr1x3dzv.jpg)
 
++ 
+
 ## 7. 系统调用
 
 ### 系统调用的开销
@@ -771,14 +771,13 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 + 信号是软中断。信号定义在`bits/signum.h`中
 
-+ 编号为0的信号为空信号，kill的signo为0时，只执行正常的错误检查，不发送信号，常被用来确定一个进程是否存在，不存在会返回-1，`errno`为`ESRCH`。
++ 编号为`0`的信号为空信号，`kill`的`signo`为`0`时，只执行正常的错误检查，不发送信号，常被用来确定一个进程是否存在，不存在会返回-1，`errno`为`ESRCH`。
 
   ```
   SIGABRT
   SIGALRM
   ```
 
-  
 
 ## 9. IO管理
 

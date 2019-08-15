@@ -226,7 +226,6 @@
 + `DBImpl::Recover`
   + 先对`dbname/LOCK`文件加锁，对文件的加锁通过`fcntl(fd, F_SETLK, &f);`实现
   + 找到`dbname/CURRENT`之后根据`MANIFEST`文件等恢复数据
-+ 
 
 #### 缓存系统
 
@@ -600,3 +599,70 @@ inline uint32_t DecodeFixed32(const char* ptr) {
     + 因为 `SSTable` 是不变的，因此，我们可以把永久删除被标记为*删除*的数据的问题，转换成对废弃的`SSTable` 进行垃圾收集的问题了。
     + 每个 `Tablet` 的 `SSTable` 都在 `METADATA` 表（保存了 `Root SSTable`的集合）中注册了。`Master` 服务器采用**标记-删除**的垃圾回收方式删除 `SSTable` 集合中废弃的 `SSTable`。
     + `SSTable` 的不变性使得分割 `Tablet` 的操作非常快捷。我们不必为每个分割出来的 `Tablet` 建立新的 `SSTable` 集合，而是共享原来的 `Tablet` 的 `SSTable` 集合。
+
+## PolarFS
+
+​	![1565836909332](C:\Users\ndsl\AppData\Roaming\Typora\typora-user-images\1565836909332.png)
+
++ 利用`RDMA`，`NVMe`，`SPDK`
++ 写延迟与本地文件系统写`SSD`接近
++ 使用`ParallelRaft`保证副本一致性，并且不想raft必须顺序提交，这个可以做无序`I/O`的容错，
+  +  which allows out-of-order log acknowledging, committing and applying
++ 计算与存储分离：
+  + 各层可以使用不同的硬件，提供统一的接口
+  + 磁盘可扩展，存储层做负载均衡
+  + 数据库易于做迁移，因为全在存储层
++ 基于虚拟化技术部署数据库
++ 易于实现只读实例和快照
++ `HDFS`和`Ceph`在磁盘上有更高的延迟，在`PCIe SSD`上差距更大，Mysql跑在这些系统上的性能比直接本地系统差很多
++ 在用户空间实现轻量级的网络栈和`I/O`栈，避免陷入内核和处理内核中的锁的问题
++ 提供 `POSIX-like` 的文件系统`API`，并且编译进数据库进程，这样可以整个`I/O`路径可以在用户空间完成，减少不必要的内存拷贝、锁竞争、上下文切换等，同时`DMA`大量用于内存和`RDMA NIC/NVMe disks`传输数据
++  `NVMe SSD and RDMA`的延迟大概在几十微秒
++ `POLARDB`修改自`AliSQL`，`AliSQL`是`Mysql`的一个`fork`分支
++ `POLARDB`有两类节点
+  + 主节点(`primary node`)：可以处理读写请求
+  + 只读节点(`RO node)`：只处理读
++ `PolarFS`支持将对文件的修改创建等操作后的文件元数据同步给`RO`节点，使所有操作`RO`可见
++ `PolarFS`确保对文件元数据的并发修改会被串行化以使所有数据库实例都一致
++ 网络分区发生时可能会出现多个主节点，`PolarFS`确保只有真正的主节点会成功服务，避免数据冲突
+
+### 架构
+
++ 存储层
+
+  + 掌控所有的磁盘硬件资源
+  + 对每个数据库实例提供一个`volume`
+
++ 文件系统层
+
+  + 支持基于`volume`的文件管理，并且管理访问的并发和互斥
+
++ `libpfs`
+
+  ![](https://ws1.sinaimg.cn/large/77451733gy1g606j79291j20em0dxjvk.jpg)
+
+  + 一个用户空间的文件系统实现库提供 `POSIX-like` 的文件系统`API`
+
++ `PolarSwitch`
+
+  + 位于计算节点，用于重定向`I/O`请求给`ChunkServer`
+
++ `ChunkServer`
+
+  + 部署于存储节点，用于服务`I/O`请求
+
++ `PolarCtrl`
+
+  + 控制平台，包含一系列的`Master`节点，以及对应存储和计算机的`agent`
+  + 使用`Mysql`实例作为元数据仓库
+
+### 类似系统
+
++ HDFS
++ Ceph
++ 硬件
+  + 3D XPoint SSD
+  + NVMe SSD
+  + PCIe SSD
+  + NAND SSDs
+  + SPDK
