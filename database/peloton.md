@@ -42,8 +42,7 @@
   + `LogicalLimit`：在`LogicalDistinct`后生成。
 
 + `OptimizerMetadata::RecordTransformedExpression`：
-
-  + 将上一步生成的树中的节点逐个转换为`group_expression`，每个`group_expression`。
++ 将上一步生成的树中的节点逐个转换为`group_expression`，每个`group_expression`。
     + 封装层次：`Group <- GroupExpression <- Operator <- BaseOperatorNode <- <LogicalFilter...>`
 
 #### Optimizer::GetQueryInfo

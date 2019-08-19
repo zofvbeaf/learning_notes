@@ -989,6 +989,10 @@ void f(sometype1* a, int b); // f(p, NULL) 会调这个
 
 + `std::decay`就是对一个类型进行退化处理，把各种引用啊什么的修饰去掉，把cosnt int&退化为int，这样就能通过`std::is_same`正确识别出加了引用的类型了 。
 
+### static_assert
+
++ 编译期间断言，可以指定断言不成立打印错误提示消息
+
 ## 线程支持库
 
 + c++11开始支持
@@ -996,6 +1000,8 @@ void f(sometype1* a, int b); // f(p, NULL) 会调这个
 + 编译含有`std::thread`的程序需要加上`-pthead`
 
 ### 互斥
+
+#### std::mutex
 
 + `std::mutex`
   + 线程占有 `mutex` 时，所有其他线程若试图要求 `mutex` 的所有权，则将阻塞（对于 `lock` 的调用）或收到 `false` 返回值（对于 `try_lock` ）.
@@ -1029,6 +1035,29 @@ private:
 
 + `void lock( Lockable1& lock1, Lockable2& lock2, LockableN&... lockn );`
   + 锁定给定的可锁 (Lockable) 对象 lock1 、 lock2 、 ... 、 lockn ，用免死锁算法避免死锁。
+
+####  std::condition_variable
+
++ `condition_variable` 类是同步原语，能用于阻塞一个线程，或同时阻塞多个线程，直至另一线程修改共享变量（*条件*）并通知 `condition_variable` 。
++ 有意修改变量的线程必须
+  + 获得 `std::mutex` （典型地通过 `std::lock_guard` ）
+  + 在保有锁时进行修改
+  + 在 `std::condition_variable` 上执行 `notify_one` 或 `notify_all` （不需要为通知保有锁）
++ 即使共享变量是原子的，也必须在互斥下修改它，以正确地发布修改到等待的线程。
++ 任何有意在 `std::condition_variable` 上等待的线程必须
+  + 获得 `std::unique_lock<std::mutex>`，在与用于保护共享变量者相同的互斥上
+  + 执行 `wait` 、 `wait_for` 或 `wait_until` ，等待操作自动释放互斥，并悬挂线程的执行。
+  + `condition_variable` 被通知时，时限消失或虚假唤醒发生，线程被唤醒，且自动重获得互斥。之后线程应检查条件，若唤醒是虚假的，则继续等待。
++ `wait` 时会原子地解锁 `lock` ，阻塞当前执行线程，并将它添加到于 *this 上等待的线程列表。线程将在执行 `notify_all()` 或 `notify_one()` 时被解除阻塞。解阻塞时，无关乎原因， `lock` 再次锁定且 `wait` 退出。
+
+#### std::unique_lock
+
++ 通用互斥包装器，允许延迟锁定、锁定的有时限尝试、递归锁定、所有权转移和与条件变量一同使用
++ `unique_lock`比`lock_guard`使用更加灵活，功能更加强大
++ 使用`unique_lock`需要付出更多的时间、性能成本
++ 相当于`unique_lock`独占了`mutex_`的所有权
++ `std::unique_lock`还支持同时锁定多个`mutex`，这避免了多道加锁时的资源死锁问题
++ 在使用`std::condition_variable`时需要使用`std::unique_lock`而不应该使用`std::lock_guard`
 
 ### future
 
@@ -1075,7 +1104,25 @@ int main()
 }
 ```
 
+### c++11六种内存序
 
+#### [Release-Acquire ordering](https://senlinzhan.github.io/2017/12/04/cpp-memory-order/)
+
++ 在这种模型下，`store()`使用`memory_order_release`，而`load()`使用`memory_order_acquire`。这种模型有两种效果
+  + 第一种是可以限制 CPU 指令的重排：
+    + 在`store()`之前的所有读写操作，不允许被移动到这个`store()`的后面。
+    + 在`load()`之后的所有读写操作，不允许被移动到这个`load()`的前面。
+  + 假设 Thread-1 `store()`的那个值，成功被 Thread-2 `load()`到了，那么 Thread-1 在`store()`之前对内存的所有写入操作，此时对 Thread-2 来说，都是可见的。
+
+#### Relaxed ordering
+
++  仅仅保证`load()`和`store()`是原子操作，除此之外，不提供任何跨线程的同步。
++ 不保证`CPU`乱序
+
+#### Sequential consistency
+
++ 所有线程执行指令的顺序都是按照源代码的顺序；
++ 不保证`CPU`乱序
 
 ## 其它
 

@@ -9,7 +9,7 @@
 
 ### gporca整体优化流程
 
-+ 输入: 要优化的 要求
++ 输入: 要优化的要求
 + 把 `expr` 插入到`memo` 中, 产生一些 `Group` 和一个 `Gexpr`. 通常来说就是把 原来`expr`中每个节点变成一个`Group`.
 + **Exploration:** 递归地生成逻辑上等价的`Gexpr` (详见后文). 此过程中会在已 有的`Group`中插入新的`Gexpr`, 也可能产生很多新的`Group`.
 + 为每个`Group`导出Scalar/Logical Property 和 `Statistics`.(每`Group` 内相同, 共享)

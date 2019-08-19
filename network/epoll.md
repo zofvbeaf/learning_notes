@@ -125,7 +125,7 @@ struct callback_head {
       + `file->private_data = ep`
       + `fd_install(fd, file);`  使 `task_struct->files->fdt->fd[fd] = file`
       + `eventpoll_fops->poll = ep_eventpoll_poll`
-        + [poll函数](https://blog.csdn.net/qq69696698/article/details/7473517)用于驱动提供给应用程序探测设备文件是否可读或可写。当该函数指针为空时表示设备可对文件非阻塞的读写。调用poll函数的进程会`sleep`知道可读或可写。
+        + [poll函数](https://blog.csdn.net/qq69696698/article/details/7473517)用于驱动提供给应用程序探测设备文件是否可读或可写。当该函数指针为空时表示设备可对文件非阻塞的读写。调用poll函数的进程会`sleep`直到可读或可写。
 
 ### epoll_ctl
 
@@ -193,7 +193,7 @@ void FD_ZERO(fd_set *set);
     + 调用`fd`对于`file`的`f_op->poll`回调
       + 如果`poll_table`中有回调函数，它将负责创建一个`wait_queue_entry`，并将该`entry`挂在`file`提供的`wait_queue_head`中。然后，`poll`回调函数还将返回文件的状态（`POLLIN/POLLOUT/…`）
       + 如果`poll_table`没有回调函数，则`poll`回调仅仅返回文件的状态
-    + 根据`poll`回调返回的文件状态，判断返回状态是否为想要监听的状态。比如返回了`POLLIN`，且`fd`恰好在读的`fd_set`中，则在返回给用户的读`fd_set`中，标记该位，**然后将`poll_table`的回调置为`NULL`**。这一步很重要，因为它会导致后续对fd的`f_op->poll`回调不再挂任何`wait_queue_entry`到剩下的`fd`的`wait_queue_head`中。
+      + 根据`poll`回调返回的文件状态，判断返回状态是否为想要监听的状态。比如返回了`POLLIN`，且`fd`恰好在读的`fd_set`中，则在返回给用户的读`fd_set`中，标记该位，**然后将`poll_table`的回调置为`NULL`**。这一步很重要，因为它会导致后续对fd的`f_op->poll`回调不再挂任何`wait_queue_entry`到剩下的`fd`的`wait_queue_head`中。
   + 当对于所有的`fd`都判断完毕后
     + 如果得到了想要监听的事件，那么就取下那些之前遍历时挂上去的`wait_queue_entry`，然后将对应的事件拷贝给用户。
     + 如果超时了，那么操作和上面一样

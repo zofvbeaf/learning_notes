@@ -1,3 +1,5 @@
+
+
 ## leveldb
 
 + 写性能十分优秀，基于`LSM(Log Structured-Merge Tree)`树实现，`LSM`树的核心思想就是放弃部分读的性能，换取最大的写入能力。
@@ -27,6 +29,7 @@
   + 异常情况发生时，均可以通过日志文件进行恢复`(redo/undo)`
   + 每次日志的写操作都是一次顺序写，因此写效率高，整体写入性能较好
   + leveldb的**用户写操作的原子性**同样通过日志来实现。
+  + 生成`immutable memtable`创建新的`memtable`时也会生成新的`log`文件
 
 + `sstable`
 
@@ -60,32 +63,80 @@
 ### 写入流程
 
 + 其实`leveldb`仍然存在写入丢失的隐患。在写完日志文件以后，操作系统并不是直接将这些数据真正落到磁盘中，而是暂时留在操作系统缓存中，因此当用户写入操作完成，操作系统还未来得及落盘的情况下，发生系统宕机，就会造成写丢失；但是若只是进程异常退出，则不存在该问题。
+
 + 调用 `MakeRoomForWrite` 方法为即将进行的写入提供足够的空间；
   + 在这个过程中，由于 `memtable` 中空间的不足可能会冻结当前的 `memtable`，发生 `Minor Compaction` 并创建一个新的 `MemTable` 对象；
   + 在某些条件满足时，也可能发生 `Major Compaction`，对数据库中的 `SSTable` 进行压缩；
+  
 + 通过 `AddRecord` 方法向日志中追加一条写操作的记录；
+
 + 再向日志成功写入记录后，我们使用 `InsertInto` 直接插入 `memtable` 中，完成整个写操作的流程；
+
++ `WriteBatch->rep_`的`header`为`12B`，`seq_number(8B) | count(4B) | kTypeValue(1B) | key_len(最多5B) | key | value_len | value`
++ 前`12B`被调用`string::resize(12)`初始化为`0`
+  + `seq_number`：`WriteBatch::Put`时未设置
+  + `count`：每次插入一个一条记录值时会加1
+  + `kTypeValue`：若是删除操作则为`kTypeDeletion`，占`1B`，这个字节是被`push_back`进去的，在memtable中改为`seq`占`7B`，`type`占`1B`
+  + `key_len`：编码为`Varint32`
+  + `key`：原始内容
+  + `value_len`与`value`的处理方式与`key`一样，`type`为`kTypeDeletion`时没有这两个字段
+  
++ `DBImpl::Write`
+
+  + 获取`DBImpl::mutex_`锁
+  + 向内部 `writers_`  双端队列的**尾部**中添加一个新的 `Writer`, 内含此 `WriteBatch`
+  + 判断当前线程所下发`Writer`是否已经执行完或者是否在队列**头部**，不是的话就等条件变量上
+  +  `DBImpl::MakeRoomForWrite`
+    + 当`level0`的文件大于等于`8`个时，会睡眠`1ms`
+      + `std::this_thread::sleep_for(std::chrono::microseconds(1000));`
+    + 当内存使用小于等于`options_.write_buffer_size`即`4M`时表示memtable的空间够用
+      + `Memtable`中分配内存都是通过`arena`来的，所以便于统计
+    + 否则若内存不够或`level0`文件太多，等待`background_work_finished_signal_`条件变量，其他线程会做`compaction`
+    + 否则新建日志文件，序列号自增，`imm_ = mem_`
+      + `has_imm_.store(true, std::memory_order_release);`
+    + 如果`Memtable`内存足够会直接退出。
+  + `BuildBatchGroup`，遍历writers_队列，将多个`WriteBatch`拼在一起，打下不会超过`1M`
+  + `WriteBatch`的`seq`号等于`versions_->LastSequence() + 1`，更新`version_->LastSequence `，这个sequence主要用来记录已经加入到`leveldb`中的`K-V`对（如果类型为`delete`则只有`Key`）的数量
+  + 写日志
+  + 插入`memtable`：`writeBatchInternal::InsertInto(updates, mem_);`
+    + 通过调用`WriteBatchInternal::InsertInto -> WriteBatch::Iterate(Handler* handler)`实现
+      + `Handler`即为`MemTableInserter`
+    + 取出`seq`，`type`，`key`和`value`通过`MemTable::Add`添加到`memtable`中
+      + 在`memtable`中将`key+seq+type`作为`internal_key`，存储格式为
+        + `key | seq(7B) | type(1B)`
+      + 最终格式为`internal_key_len(4B) | internal_key | val_len(4B) | value`
+    + 最终插入跳表中
+  + 逐个对刚刚写入的`writer`的条件变量调用`signal`
+
+
+### DBImpl::MaybeScheduleCompaction
+
++ 当前`DB`正在做`compaction`时会设置`background_compaction_scheduled_`为`true`
++ 做`compaction`时要确保没有其他线程在对此`DB`做`compaction`，并且`imm_ != nullptr`或某些`level`的 `sstable`需要做`compaction`
++ `env_->Schedule(&DBImpl::BGWork, this);`
+  + 若没有后台线程则新建一个，线程不断从`background_work_queue_`队列获取任务，内含要执行的函数的指针和参数。compaction任务即为`DBImpl::BGWork -> DBImpl::BackgroundCompaction() `
+  + 后台线程在没有任务时就`wait`在条件变量上，有任务下发时主线程会调用`signal`通知，因为主线程是先往队列里下发任务再释放`mutex`锁的，所以线程醒来会获取到锁并且能读到任务
++ `DBImpl::BackgroundCompaction()`的主要流程
+  + 当`imm_`不为空时`CompactMemTable();`
+    + `DBImpl::WriteLevel0Table`
+      + 新建一个`FileMetaData meta`
+      + `BuildTable`：
+        + 新建一个文件并将`imm_`中的内容写入，每此网`data block`中添加`KV`对时都会检查是否填充的内容到达一个`block_size = 4KB`就会调用`PosixWritableFile::Append`写数据，数据都是通过`Snappy`压缩过的
+        + `write`总是先写到用户缓冲区`64KB`，等到达到此`64KB`写满时才调用`::write`
+        + 当所有`data block`写完了之后就调用`TableBuilder::Finish`，把`index_block`等`sstable`的其他部分写入文件，最后调用`Sync`刷盘
+    + `Memtable::Table::Iterator`实际就是`SkipList::Iterator`
+  + `VersionSet::PickCompaction()` 筛选合适的 `level` 及 文件
 
 ### 实现
 
-+ `DB::Open`
-  
-  + `leveldb::DB::Open(options, "testdb", &db)`
-  
-    ```c++
-    Status DB::Open(const Options& options, const std::string& dbname,
-                    DB** dbptr) {
-    	DBImpl* impl = new DBImpl(options, dbname);                
-    }
-    ```
-  
-    + `DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)`
-      + 新建`TableCache`和`VersionSet`
-  
-+ `Put`
-  
-  + `WriteBatch -> WriteBatchInternal`
-  + `WriteBatch->rep_`的`header`为`12B`，`seq_number(8B)count(4B)kTypeValue(1B)key_len(最多5B)key()value_len(最多5B)value()`
+#### DBImpl
+
+```c++
+class DBImpl : public DB { 
+    port::Mutex mutex_; // DBImpl::Write 等操作需要获取此锁
+	std::deque<Writer*> writers_ GUARDED_BY(mutex_); //
+};
+```
 
 #### options
 
@@ -118,6 +169,11 @@
         reuse_logs(false),
         filter_policy(nullptr) {
   }
+  // default
+  // WriteOptions::sync = false; 
+  // ReadOptions::verify_checksums = false
+  // ReadOptions::fill_cache = true;
+  // ReadOptions::snapshot = nullptr;
   ```
 
 #### sstable
@@ -138,7 +194,7 @@
 
   + 第一部分用来存储`key-value`数据。由于`sstable`中所有的`key-value`对都是严格按序存储的，用了节省存储空间，`leveldb`并不会为每一对`key-value`对都存储完整的`key`值，而是存储与**上一个key非共享的部分**，避免了`key`重复内容的存储。
 
-  + 每间隔若干个`keyvalue`对，将为该条记录重新存储一个完整的`key`。重复该过程（默认间隔值为16），每个重新存储完整`key`的点称之为`Restart point`。
+  + 每间隔若干个`keyvalue`对，将为该条记录重新存储一个完整的`key`。重复该过程（默认间隔值为`block_restart_interval = 16`），每个重新存储完整`key`的点称之为`Restart point`。
 
   + 每个数据项的格式如下图所示：
 
@@ -153,6 +209,8 @@
 ##### filter block
 
 + 为了加快`sstable`中数据查询的效率，在直接查询`datablock`中的内容之前，`leveldb`首先根据`filter block`中的过滤数据（这些过滤数据一般指代布隆过滤器的数据）判断指定的`datablock`中是否有需要查询的数据，若判断不存在，则无需对这个`datablock`进行数据查找
+
++ `option`中`filter_policy != nullptr`才会构造`filter block`
 
   ![](https://ws1.sinaimg.cn/large/77451733gy1g5ywr5v50ej213i0s0q71.jpg)
 
@@ -195,7 +253,24 @@
 
   ![](https://ws1.sinaimg.cn/large/77451733gy1g5yz3oajuhj20bk07ugm6.jpg)
 
-##### Table::Open
+#### log
+
++ 日志以`block`进行组织，每个`block`的大小为`kBlockSize = 32KB`，每个`block`中包含了若干个完整的`chunk`。一条日志记录包含一个或多个`chunk`。
+
++ 每个`chunk`包含了一个`7`字节大小的`header`
+
+  + 前`4`字节是该`chunk`的`CRC`校验码`checksum`
+  + 紧接的`2`字节是该`chunk`数据的长度
+  + 最后一个字节是该`chunk`的类型
+  + 其中`checksum`校验的范围包括`chunk`的类型以及随后的`data`数据，此`data`即`WriteBatch`中的数据的拷贝
+  
++ 每次写日志文件后都会调用`sync`（调用`write`写完要写的整条`record`之后），要写的内容太长超过`64KB`，会分几次写到磁盘上，因为在`leveldb`在用户态空间维护了一个`kWritableFileBufferSize = 64KB`的缓冲区，数据一般是先写到这里，再通过`flush`调`write`，当然写日志时每次也会调`sync`
+
++ 写日志时当当前`block`中的大小不足以容纳一个`header`时会在`block`末尾补`0`，重新将`block_offset_`设为`0`表示开启下一个`block`
+
+  ![](http://ww1.sinaimg.cn/large/77451733ly1g62y2r7xp5j21920l244f.jpg)
+
+#### Table::Open
 
 + 先读出`48B`的`footer`
 + 之后根据`footer`中的`index block's inex`读出`index block`，传进来的为`RandomAccessFile`，其读取通过`pread`实现。
@@ -207,14 +282,13 @@
 #### DB::Open
 
 + `new DBImpl`
-
-  + `SanitizeOptions`
++ `SanitizeOptions`
   
-    + 检查用户输入的option的范围，创建名为`dbname`的目录，将原来存在的`dbname/LOG`文件重命名为`dbname/LOG.old`，并新建名为`dbname/LOG`的日志文件，对应的内部数据类型为 `PosixLogger`，内部调用`vsnprintf`打印日志信息，每次写日志都会调用`std::fwrite`和`std::fflush`
+    + 检查用户输入的`option`的范围，创建名为`dbname`的目录，将原来存在的`dbname/LOG`文件重命名为`dbname/LOG.old`，并新建名为`dbname/LOG`的日志文件，对应的内部数据类型为 `PosixLogger`，内部调用`vsnprintf`打印日志信息，每次写日志都会调用`std::fwrite`和`std::fflush`
     + `Options::info_log`指向了新建的 `PosixLogger`，如果原本`Options::info_log`不为空，则不会执行新建`LOG`文件等操作
     + 若`Options::block_cache == nullptr`则会新建一个`8M`的`LRUCache`，使其指向它
   + `new TableCache`
-    + `cache`条数为`Options::max_open_files - kNumNonTableCacheFiles;`即`5000-10=4990`个。
+    + `cache`条数为`Options::max_open_files - kNumNonTableCacheFiles;`即`1000-10=990`个，最多可以设为`50000-10`个。
     + `TableCache`即用`LRUCache`缓存`Table`
   + `new VersionSet`
     + `next_file_number_`直接设定为`2`
@@ -226,6 +300,13 @@
 + `DBImpl::Recover`
   + 先对`dbname/LOCK`文件加锁，对文件的加锁通过`fcntl(fd, F_SETLK, &f);`实现
   + 找到`dbname/CURRENT`之后根据`MANIFEST`文件等恢复数据
++ 新建`impl->logfile_`，序列号通过`impl->versions_->NewFileNumber()`获取，从`2`开始递增
++ 新建`MemTable`，`impl->mem_ = new MemTable`，对其引用计数`+1`
++ `MaybeScheduleCompaction`
+
+#### TableBuilder
+
++ 
 
 #### 缓存系统
 
@@ -293,6 +374,45 @@
     + 当哈希表中数据项的个数少于哈希桶的个数时，需要进行收缩。
     + 收缩时，哈希桶的个数变为原先的一半，`2`个旧哈希桶的内容被合并成一个新的哈希桶，过程与扩张类似，在这里不展开详述。
 
+##### 实现
+
++ `LRUHandle`：代表一个`cache`条目
+
+  ```c++
+  struct LRUHandle {
+    void* value;
+    void (*deleter)(const Slice&, void* value);
+    // next_hash 代表在hash桶中下一个元素的位置
+    LRUHandle* next_hash;
+    // 双链表中下个元素的位置
+    LRUHandle* next;
+    // 双链表中上个元素的位置
+    LRUHandle* prev;
+    size_t charge;      // TODO(opt): Only allow uint32_t?
+    size_t key_length;
+    // 使用次数
+    uint32_t refs;
+    // key 的hash值用于在LRUCache数组以及hash表中定位
+    uint32_t hash;      // Hash of key(); used for fast sharding and comparisons
+    char key_data[1];   // Beginning of key
+    Slice key() const {
+        return Slice(key_data, key_length);
+    }
+  };
+  ```
+
++ `HandleTable`：`leveldb`自己实现了一个哈希表，并且哈希表的桶的数量一定为`2`的倍数，最小为`4`，扩容时就是新建一个`hash`表，把原来的都拷贝过来再把就的`list_`指针指向新的
+
++ `LRUCache`：链表头是最新的，最末尾的是最旧的。
+
++ 每个`TableCache`对应一个`ShardLRUCache`，每个`ShardLRUCache`会有`16`个`shard LRUCache`，所有`ShardLRUCache`中加起来最多有`990`个`LRUCacheEntry`。
+
+  + `shard`就是将整个`LRUCache`分成多个，分别有锁，相当于分部分加锁，降低锁的粒度，减少竞争。
+
++ `Leveldb` 实现的`LRUCahe` 基于`hashtable`以及双向链表实现，为了提升性能以及保证跨平台特性，`Leveldb` 实现了一个线程安全的拉链式`hashtable`,此`hashtable` 的缺点是当触发扩容操作的时候需要将老`hashtable` 的全部元素复制到新的`hashtable` 中，这会期间会一直占用锁，此时多线程环境下的读写会阻塞。这一点`Memcached` 中实现的`hashtable`是有一个线程专门负责扩展，每次只扩展一个元素。
+
++ `Leveldb` 为了提升多线程环境下的读写性能，将固定容量的`Cache`分摊到多个`LRUCache`，每个`LRUCache`保证自己的线程安全，这就降低了多线程环境下锁的竞争。这种做法与分段锁的思想类似。
+
 #### 布隆过滤器
 
 + `Bloom Filter`是一种空间效率很高的随机数据结构，它利用位数组很简洁地表示一个集合，并能判断一个元素是否属于这个集合。`Bloom Filter`的这种高效是有一定代价的：在判断一个元素是否属于某个集合时，有可能会把不属于这个集合的元素误认为属于这个集合（`false positive`）
@@ -305,7 +425,66 @@
 
 + 当插入值`x`后，分别利用`k`个哈希函数（图中为3）利用`x`的值进行散列，并将散列得到的值与`bloom`过滤器的容量进行取余，将取余结果所代表的那一位值置为`1`
 
-+ ![](https://ws1.sinaimg.cn/large/77451733gy1g5ywzj61mvj208801vq2s.jpg)
+  ![](https://ws1.sinaimg.cn/large/77451733gy1g5ywzj61mvj208801vq2s.jpg)
+
+
+#### Arena
+
++ 用于内存分配，同时方便内存使用量统计与回收
++ `Arena`中每次向操作系统要一个`kBlockSize = 4096`大小的内存用于分配，当单次请求`size > kBlockSize/4`时，则直接向操作系统要一个`size`大小的`block`给上层
++ `Arena::AllocateAligned`用于分配按`8B`对齐的内存，如果是新建一个`block`返回那么地址肯定是对齐的，`glibc`的`malloc`的实现保证了，否则若是从现有block中分配，则需要先把指针移到对其的位置再分配
+
+#### skiplist
+
++ 随机数生成（`util/random.h`）采用线性同余法生成，`seed = (seed * A) % M`
+
++ 层数最高为：`enum { kMaxHeight = 12 };`
+
++ `NewNode`的实现：`new (node_memory) Node(key);`在预先分配好的内存上构造`Node`对象，node_memory指向了一个可以容纳`height`个`Node*`的空间，类似于
+
+  ```c++
+  struct Foo {
+      int key;
+      char val[1];
+  };
+  const char* name = "hongjin";
+  Foo *f = malloc(sizeof(Foo) - 1 + strlen(name));
+  free(f); // 释放起来很简单
+  ```
+
++ `skiplist`初始化：
+
+  ```c++
+  template <typename Key, class Comparator>
+  SkipList<Key, Comparator>::SkipList(Comparator cmp, Arena* arena)
+      : compare_(cmp), // MemTable::KeyComparator, 比较时也是拿 internal_key 进行比较
+        arena_(arena), // Memtable::arena_
+        head_(NewNode(0 /* any key will do */, kMaxHeight)),
+        max_height_(1), 
+        rnd_(0xdeadbeef) {
+    for (int i = 0; i < kMaxHeight; i++) {
+      head_->SetNext(i, nullptr);
+    }
+  }
+  ```
+
++ `rnd_`初始化：`rnd_(0xdeadbeef)`
+
++ `max_height_`初始为`1`
+
++ 初始化`head_`的每一层都为`nullptr`
+
++ `Insert`
+
+  + `FindGreaterOrEqual`
+
++ `RandomHeight`：从`1`开始每次以四分之一的概率`+1`
+
++ `skiplist`的`Comparator`
+
+  + `DBImpl`构造时的comparator为默认的`BytewiseComparator`，构造`Memtable`时将其传入被隐式转化为了`InternalKeyComparator`，`Memtable`中有一个`Memtable::KeyComparator`，其内部重载了`operator()`从而每次比较会取出`internalkey`传递给`InternalKeyComparator`进行比较，`InternalKeyComparator`就取出用户指定的`Key`进行比较，若相等就会比较序列号+类型组成的那`8B`内容，`skiplist`的`Comparator`即`Memtable::KeyComparator`
+
++ 
 
 ### 其它
 
