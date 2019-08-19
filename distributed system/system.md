@@ -109,8 +109,9 @@
   + 逐个对刚刚写入的`writer`的条件变量调用`signal`
 
 
-### DBImpl::MaybeScheduleCompaction
+### Compaction
 
++ 调用`DBImpl::MaybeScheduleCompaction`
 + 当前`DB`正在做`compaction`时会设置`background_compaction_scheduled_`为`true`
 + 做`compaction`时要确保没有其他线程在对此`DB`做`compaction`，并且`imm_ != nullptr`或某些`level`的 `sstable`需要做`compaction`
 + `env_->Schedule(&DBImpl::BGWork, this);`
@@ -121,9 +122,15 @@
     + `DBImpl::WriteLevel0Table`
       + 新建一个`FileMetaData meta`
       + `BuildTable`：
-        + 新建一个文件并将`imm_`中的内容写入，每此网`data block`中添加`KV`对时都会检查是否填充的内容到达一个`block_size = 4KB`就会调用`PosixWritableFile::Append`写数据，数据都是通过`Snappy`压缩过的
+        + 新建一个文件（文件名为`dbname/filenum.ldb`）并将`imm_`中的内容写入，每当往此`data block`中添加`KV`对时都会检查是否填充的内容到达一个`block_size = 4KB`就会调用`PosixWritableFile::Append`写数据，数据都是通过`Snappy`压缩过的
         + `write`总是先写到用户缓冲区`64KB`，等到达到此`64KB`写满时才调用`::write`
         + 当所有`data block`写完了之后就调用`TableBuilder::Finish`，把`index_block`等`sstable`的其他部分写入文件，最后调用`Sync`刷盘
+        + `table_cache->NewIterator`
+          + 通过`TableCache::FindTable`将此`Table`填入`LRUCache`，会读入磁盘上文件除`data block`以外的内容到磁盘中
+        + 选择与当前`memtable`有值域范围重合的合适的`level`及当前新生成的`ldb`文件填入`version_edit`中
+    + `VersionSet::LogAndApply`
+      + 在`current version`上应用指定的`VersionEdit`，生成新的`MANIFEST`信息，保存到磁盘上，并用作`current version`
+      + 
     + `Memtable::Table::Iterator`实际就是`SkipList::Iterator`
   + `VersionSet::PickCompaction()` 筛选合适的 `level` 及 文件
 
@@ -178,7 +185,7 @@ class DBImpl : public DB {
 
 #### sstable
 
-+ `sstable`大小最大默认`2M`，数据按`Block`划分，每个块大小为`4kB`
++ `sstable`大小最大默认`2M`，数据按`Block`划分，每个块大小为`4kB`，[对应磁盘上的文件](http://blog.jcix.top/2018-05-11/leveldb_paths/)为`*.ldb`，旧版本叫`*.sst`
 
 + 每个`block`的尾部有`5B`用于存储：`1-byte type + 32-bit crc`
 
@@ -276,8 +283,10 @@ class DBImpl : public DB {
 + 之后根据`footer`中的`index block's inex`读出`index block`，传进来的为`RandomAccessFile`，其读取通过`pread`实现。
 + 之后`*table = new Table(rep);`，将结果`Table`传给传递进来的参数。
 + `(*table)->ReadMeta(footer);`：读取`meta index block`
-+ 通过`meta index block`找到`filter block`并调用`ReadFilter()`读取
-+ 读到`filter block`后调用`rep_->filter = new FilterBlockReader()`创建`FilterBlockReader`存入`Table::rep_`中
+  + 通过`meta index block`找到`filter block`并调用`ReadFilter()`读取
+  + 读到`filter block`后调用`rep_->filter = new FilterBlockReader()`创建`FilterBlockReader`存入`Table::rep_`中
++ 也就是说每一个`Table`对象，在调用Open后其内部就存了除`data block`在内的其余部分信息在内存中
++ 在`TableCache`中存放的信息即为：`<filenumber, <RandomAccessFile, Table> >`
 
 #### DB::Open
 
@@ -413,6 +422,10 @@ class DBImpl : public DB {
 
 + `Leveldb` 为了提升多线程环境下的读写性能，将固定容量的`Cache`分摊到多个`LRUCache`，每个`LRUCache`保证自己的线程安全，这就降低了多线程环境下锁的竞争。这种做法与分段锁的思想类似。
 
+##### TableCache
+
++ 在`TableCache`中存放的信息即为：`<filenumber, <RandomAccessFile, Table> >`
+
 #### 布隆过滤器
 
 + `Bloom Filter`是一种空间效率很高的随机数据结构，它利用位数组很简洁地表示一个集合，并能判断一个元素是否属于这个集合。`Bloom Filter`的这种高效是有一定代价的：在判断一个元素是否属于某个集合时，有可能会把不属于这个集合的元素误认为属于这个集合（`false positive`）
@@ -484,7 +497,6 @@ class DBImpl : public DB {
 
   + `DBImpl`构造时的comparator为默认的`BytewiseComparator`，构造`Memtable`时将其传入被隐式转化为了`InternalKeyComparator`，`Memtable`中有一个`Memtable::KeyComparator`，其内部重载了`operator()`从而每次比较会取出`internalkey`传递给`InternalKeyComparator`进行比较，`InternalKeyComparator`就取出用户指定的`Key`进行比较，若相等就会比较序列号+类型组成的那`8B`内容，`skiplist`的`Comparator`即`Memtable::KeyComparator`
 
-+ 
 
 ### 其它
 
