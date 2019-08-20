@@ -1,4 +1,184 @@
+## GFS
 
+### 设计假设
+
++ 节点失效频繁：持续监控、备份、快速和自动恢复      
++ 以大文件为主 ，100MB以上， 普遍在GB以上
++ 文件读写以追加写、流式读为主，写入后很少修改
++ 单生产者，多消费者
++ 小规模随机读较少，合并并排序后批量读取
++ 小规模随机写较少，不做优化
++ `GFS`和应用程序`API` `co-design`
++ `GFS`宽松的一致性模型和原子记录追加（无需额外的同步） 减轻了应用程序的负担
++ 高吞吐比低延迟更重要
++ `chunk`的默认大小为`64M`，选择大`chunk`块的理由：
+  + 减少了客户端和`Master`节点通讯的需求
+  + 采用较大的`Chunk`尺寸，客户端能够对一个块进行多次操作，这样就可以通过与`Chunk`服务器保持较长时间的`TCP`连接来减少网络负载
+  + 选用较大的`Chunk`尺寸减少了`Master`节点需要保存的元数据的数量。这就允许我们把元数据全部放在内存中
+
+### 接口
+
++ 常见的如：`create`, `delete`, `open`, `close`, `read`, `write`
++ 其它：
+  + `snapshot`：对文件和目录树的快速`copy`
+  + `record append` ：记录追加，原子性的，无需同步锁
+
+### 架构
+
+​    ![](https://ws1.sinaimg.cn/large/77451733gy1g665i7l93tj20o00b7wg4.jpg)
+
+#### master
+
++ 单`Master`节点，简化设计，方便管理
++ 维护所有`metadata`
+  + 包括：`Namespace`，访问控制信息，文件到`chunks`的映射，`chunk`的位置（周期性轮询获得）
+  + 所有的元数据都在`Master`的内存中，另外`Namespace`和 `file-to-chunk mapping`也会持久化到`operation log`中，`operation log`存储在`Master`的本地磁盘上，并且在远程的机器上有备份。
+  + 另外还有`operation log`
+    + 关键的元数据变更记录，元数据唯一的持久化存储记录
+    + 元数据的变化被持久化以后，日志才对客户端可见
+      + 日志会被复制到多台远程机器
+      + `Master`会收集多个日志后批量处理
+    + `Master`在灾难恢复时重演日志来恢复到最近的状态
+      + 只需要最新的`checkpoint`文件和后续的日志文件，但还是会多保留一些历史文件
+    + 日志增长到一定程度后做一次`checkpoint`
+      + `Checkpoint`文件以`B-tree`形式组织，可以直接映射到内存
+      + 独立的线程做`checkpoint`操作
++ `Chunk` 租约管理，孤儿`chunk`的垃圾回收
++ 以周期性心跳的方式和`chunk server`通信
++ 负载均衡、`chunk`或副本的创建、复制迁移
+
+#### chunk server
+
++ 文件划分为`64MB`大小的`chunk`
++ 每个`chunk`都是以`linux`文件形式存储
++ 每个`chunk`一个全局唯一的不变的`64bit`的`chunk handle`
++ 每个`chunk`默认保存三份
+
+#### client
+
++ `GFS` 将客户端代码封装成`API`供应用程序调用
++ 客户端会缓存`chunk`位置信息
+  + 直到缓存过期或文件被重新打开
+  + 批量请求和回复
++ 客户端不缓存文件数据
+  + 流式读取，不频繁访问；或文件太大无法缓存
+  + `linux`文件系统会把经常访问的数据缓存在内存中
+
+### 一致性模型
+
+![](https://ws1.sinaimg.cn/large/77451733gy1g66fid2fabj20mn07ljsv.jpg)
+
++ `consistant`: 所有客户端看到的数据都是一样的
++ `defined`: `consistant` +  客户端可以完整的看到每次的修改
+  + 所有副本的操作顺序一致
++ `write`: 偏移量有应用程序指定
++ `record append`: `GFS`选择偏移量，保证至少原子性的追加一次，可能因为出错等原因追加多次
++ 并发写入的数据会相互重叠混合，所以是`consistant but undefined`
++ `defined interspersed with inconsistent`：主要就是因为记录追加可能会重试多次，导致重复数据，所以会有一定量的`inconsistent`，但是`GFS`是有相应措施去处理的，比如使用`checksum`和通过`identifier`忽略重复的`record`
++ 经过一系列成功的修改操作之后，`GFS`确保被修改的`region`是已定义的
+  + 所有`chunk`副本修改操作顺序一致
+  + 通过`chunk`的版本号来检测`chunk`服务器是否宕机，并尽快进行垃圾回收
+
+### Implications
+
++ 应用程序尽量采用追加写
++ 从头到尾写入数据，生成文件，永久文件名
+  + 周期性`checkpoint`：记录写入多少数据以及`checksum`
+  + Readers仅校验并处理上个checkpoint之前产生的文件region
++ 并行追加
+  + 保证至少一次追加成功
+  + Readers 利用checksum识别和抛弃额外的填充数据和重复片段
+  + 也可以用记录的唯一标识符来过滤重复的内容
+
+### Leases & Mutation Order
+
++ Objective
+  + Ensure data consistent & defined 
+  + Minimize load on master
++ Master grants ‘**lease**’ to one replica
+  + Called ‘**primary**’ chunkserver
++ Primary serializes all mutation requests
+  + Communicates order to replicas
+
+### 写流程
+
+![](https://ws1.sinaimg.cn/large/77451733gy1g66gpeaczoj20gm0e1my1.jpg)
+
++ 客户端向 `Master` 询问目前哪个 `Chunk Server` 持有该 `Chunk` 的 `Lease`
++ `Master` 向客户端返回 `Primary` 和其他 `Replica` 的位置
++ 客户端将数据推送到所有的 `Replica` 上。`Chunk Server` 会把这些数据保存在内部的`LRU`缓冲区中，等待使用
++ 待所有 `Replica` 都接收到数据后，客户端发送写请求给 `Primary`。`Primary` 为来自各个客户端的修改操作安排连续的执行序列号，并按顺序地应用于其本地存储的数据
++ `Primary` 将写请求转发给其他 `Secondary Replica`，`Replica` 们按照相同的顺序应用这些修改
++ `Secondary Replica` 响应 `Primary`，示意自己已经完成操作
++ `Primary` 响应客户端，并返回该过程中发生的错误（若有）。在出现错误的情况下，写入操作可能在主`Chunk`和一些二级副本执行成功。（如果操作在主`Chunk`上失败了，操作就不会被分配序列号，也不会被传递。）客户端的请求被确认为失败，被修改的`region`处于不一致的状态。我们的客户机代码通过重复执行失败的操作来处理这样的错误。在从头开始重复执行之前，客户机会先从步骤（3）到步骤（7）做几次尝试。
++ `HDFS`只有单写的情况，所以就不需要主`datanode`来调节顺序了，写入的顺序已经由下层的`tcp`保证了，写入的数据量`packet`的滑动窗口来控制就可以了
+
+### 读流程
+
++ 首先，客户端把文件名和程序指定的字节偏移，根据固定的`Chunk`大小，转换成文件的`Chunk`索引。
++ 然后，它把文件名和`Chunk`索引发送给`Master`节点。
++ `Master`节点将相应的`Chunk`标识和副本的位置信息发还给客户端。客户端用文件名和`Chunk`索引作为`key`缓存这些信息。
++ 之后客户端发送请求到其中的一个副本处，一般会选择最近的。请求信息包含了`Chunk`的标识和字节范围。
++ 在对这个`Chunk`的后续读取操作中，客户端不必再和`Master`节点通讯了，除非缓存的元数据信息过期或者文件被重新打开。
++ 实际上，客户端通常会在一次请求中查询多个`Chunk`信息，`Master`节点的回应也可能包含了紧跟着这些被请求的`Chunk`后面的`Chunk`的信息。在实际应用中，这些额外的信息在没有任何代价的情况下，避免了客户端和`Master`节点未来可能会发生的几次通讯
+
+### 原子的记录追加
+
++ `GFS`指定偏移位置
++ `primary chunkserver`检查是否追加操作超过了这个`chunk`的最大尺寸，如果超过了就填充这个`chunk`到最大尺寸，然后通知客户端对下一个`chunk`重新进行追加操作
++ 记录追加的数据大小严格控制在`chunk`最大尺寸的`1/4` (`API`)
++ 当单次追加数据较大，被分割成了多次追加，可能会出现`undefined`的情况(分割后的每次追加仍是`defined`)
+
+### Snapshot
+
++ 可以瞬间完成对一个文件或目录树的拷贝
++ `copy-on-write`技术
++ 当`Master`收到一个对某文件的快照请求
+  + 取消此文件的`lease`，把此操作以日志方式记录到磁盘上
+  + 将源文件或目录树的元数据拷贝生成一个`snapshot`文件
+  + 对执行快照的所有`chunk`增加引用计数
++ 当对执行了快照的文件的`chunk`进行写操作时，发现引用计数大于`1`，则通知所有副本的`chunkserver`对该`chunk`进行复制，并对复制后的`chunk`进行写操作
+
+### Namespace management & locking
+
++ `GFS`不支持对目录和文件的别名（`unix`系统中的软链接和硬链接），也没有类似于`inode`的数据结构，因此对于一个文件的操作就没有必要获得其读写锁来防止修改，光是读取锁就可以防止父目录被删除
++ 如果一个写操作包含`/d1/d2/.../dn/leaf`，必须首先获得目录`/d1，/d1/d2，...，/d1/d2/.../dn` 的读取锁，以及全路径`/d1/d2/.../dn/leaf` 的读写锁
++ `/home/user`被快照到`/save/user`时如和防止创建时在`/home/user`下创建文件
+  + 快照：`/home`和`/save`的读锁、`/home/user`和`/save/user`的写锁
+  + 创建：`/home`和`/home/user`的读锁、`/home/user/foo`的写锁
+
+### 副本放置
+
++ 最大化数据可靠性和可用性，最大化网络带宽利用率，在机架间布置副本
++ `Chunk`的`Creation`, `Re-replication`, `Rebalancing`
+  + `Creation`： 平衡硬盘使用率、最近创建`chunk`较少
+    + 副本要分布在多个机架之间
+  + `Re-replication`：根据需要对其优先级排序后处理
+    + 直接从可用副本克隆
+  + `Rebalancing`：周期性检查副本分布情况，移动副本以获得更好的利用硬盘空间，更有效的进行负载均衡
+
+### 垃圾收集
+
++ 惰性回收机制
+  + 当应用程序删除一个文件，`Master`会将这个操作记录入操作日志，但是并不立即删除它，而是将它的名字改为一个包含删除时间戳的隐藏名字，然后直到`Master`进行命名空间常规扫描的时候才删除存在时间超过三天以上的有隐藏名字的文件。
++ 过期副本检测
+  + 通过`chunk`版本号来分辨是否过期
+  + 当`Master`和一个`chunk`签订新的租约就增加其版本号
+  + `Master`和客户端以及`chunkserver`的通信信息中包含有`chunk`的版本号
+
+### 容错和诊断
+
++ 高可用性：快速恢复 + 复制
+  + 快速恢复：操作日志 、快照
+  + `Chunk` 复制：每个`chunk`都有多份远程副本
+  + `Master`复制：操作日志和快照在多台机器上有副本
+    + `Shadow Master`
++ 数据完整性：
+  + 每个`chunkserver`使用`checksum`来检查数据是否损坏
+  + `Checksum`对读操作的性能影响较小
+  + 覆盖写操作：写前先读取和校验第一个和最后一个块
+  + `Chunkserver`空闲时扫描和校验每个不活动的`chunk`的内容
++ 诊断日志：记录所有`RPC`调用
 
 ## leveldb
 
