@@ -60,7 +60,7 @@
 
   + 通过这些信息，`leveldb`便可以在启动时，基于一个空的`version`，不断`apply`这些记录，最终得到一个上次运行结束时的版本信息。
 
-### 写入流程
+### [写入流程](https://izualzhy.cn/leveldb-write-read)
 
 + 其实`leveldb`仍然存在写入丢失的隐患。在写完日志文件以后，操作系统并不是直接将这些数据真正落到磁盘中，而是暂时留在操作系统缓存中，因此当用户写入操作完成，操作系统还未来得及落盘的情况下，发生系统宕机，就会造成写丢失；但是若只是进程异常退出，则不存在该问题。
 
@@ -109,15 +109,20 @@
   + 逐个对刚刚写入的`writer`的条件变量调用`signal`
 
 
-### Compaction
+### [Compaction](https://izualzhy.cn/leveldb-PickCompaction)
 
 + 调用`DBImpl::MaybeScheduleCompaction`
+
 + 当前`DB`正在做`compaction`时会设置`background_compaction_scheduled_`为`true`
+
 + 做`compaction`时要确保没有其他线程在对此`DB`做`compaction`，并且`imm_ != nullptr`或某些`level`的 `sstable`需要做`compaction`
+
 + `env_->Schedule(&DBImpl::BGWork, this);`
   + 若没有后台线程则新建一个，线程不断从`background_work_queue_`队列获取任务，内含要执行的函数的指针和参数。compaction任务即为`DBImpl::BGWork -> DBImpl::BackgroundCompaction() `
   + 后台线程在没有任务时就`wait`在条件变量上，有任务下发时主线程会调用`signal`通知，因为主线程是先往队列里下发任务再释放`mutex`锁的，所以线程醒来会获取到锁并且能读到任务
+  
 + `DBImpl::BackgroundCompaction()`的主要流程
+  
   + 当`imm_`不为空时`CompactMemTable();`
     + `DBImpl::WriteLevel0Table`
       + 新建一个`FileMetaData meta`
@@ -128,11 +133,70 @@
         + `table_cache->NewIterator`
           + 通过`TableCache::FindTable`将此`Table`填入`LRUCache`，会读入磁盘上文件除`data block`以外的内容到磁盘中
         + 选择与当前`memtable`有值域范围重合的合适的`level`及当前新生成的`ldb`文件填入`version_edit`中
+        + 新生成 `sstable`，并不一定总是会放到 `level 0`，例如如果 `key range` 与 `level 1`层的所有文件都没有 `overlap`，那就会直接放到 `level 1`。`PickLevelForMemTableOutput`是`Version`的接口，作用就是返回一个该 `sstable` 即将放入的 `level`，加上`meta`里的文件信息，统一记录到`edit`
     + `VersionSet::LogAndApply`
       + 在`current version`上应用指定的`VersionEdit`，生成新的`MANIFEST`信息，保存到磁盘上，并用作`current version`
-      + 
+        + 每个`MANIFEST`内部的数据其实就是以`LogWriter::AddRecord`的形式写下去的
+          + 更新`MANIFEST`后会通过先创建一个`dbname/discriptor_num.dbtmp`的文件，往里写入`MANIFEST`文件名并刷磁盘，再调用`rename`将其重命名为`CURRENT`（默认会覆盖原有的）
+      + 再将`current version`放到`version_set`的链表末尾去，表示最新的`version`
+    + `DBImpl::DeleteObsoleteFiles()`
+      + 检查并删除`dbname/`下不用的文件，比如序列号偏小的不再用的日志文件和`MANIFEST`等等
     + `Memtable::Table::Iterator`实际就是`SkipList::Iterator`
-  + `VersionSet::PickCompaction()` 筛选合适的 `level` 及 文件
+    
+  + `VersionSet::PickCompaction()` 
+  
+    + 筛选合适的 `level` 及 文件，初始时`compact_pointer_`为空，故会选择第一个文件，否则会选择该层第一个大于`compact_pointer_`的文件
+  
+      + 合适的条件：
+        + `level 0`的文件数大于4
+        + `Leveldb` 在 SST 文件查找效率较低时， 太多请求不在第一个 `SST` 文件命中
+        + 其他`level`文件总大小大于`10^level M`
+  
+    + 若是`level 0`，则还会选取所有与选出文件有至于范围重叠的文件，相当于递归找，因为每次添加文件后，要找的值域范围会扩大，要重新找
+  
+    + `SetupOtherInputs(Compaction* c)` 
+  
+      + `Compaction`中有一个成员`std::vector<FileMetaData*> inputs_[2];`，分别表示两层要参与`compaction`的文件，另外也记录了`inputs_[0]`的`level`
+  
+      + 首先根据`inputs_[0]`中文件的值域范围，找到所有`level+1`中所有有值域重叠的文件放入`inputs_[1]`中，同时也要根据`inputs_[1]`层中文件的值域范围反推还需要`level`层中的哪些文件
+  
+        + 这是个来回判断的过程，简单来说就是在不增加 `level + 1` 层文件，同时不会导致 `compact` 的文件过大的前提下，尽量增加 `level` 层的文件数
+          + 根据`inputs_[0]`确定`inputs_[1]`
+          + 根据`inputs_[1]`反过来看下能否扩大`inputs_[0]`
+          + `inptus_[0]`扩大的话，记录到`expanded0`
+          + 根据`expanded[0]`看下是否会导致`inputs_[1]`增大
+          + 如果`inputs[1]`没有增大，那就扩大 compact 的 level 层的文件范围
+  
+      + 到此，参与 `compact` 的文件集合就已经确定了，为了避免这些文件合并到 `level + 1` 层后，跟 `level + 2` 层有重叠的文件太多，届时合并 `level + 1` 和 `level + 2` 层压力太大，因此我们还需要记录下 `level + 2` 层的文件，后续 `compact` 时用于提前结束的判断
+  
+      + 接着记录`compact_pointer_`到`c->edit_`，在后续`PickCompaction`入口时使用
+  
+        ```c++
+        // 记录该层本次compact的最大key
+        compact_pointer_[level] = largest.Encode().ToString();
+        c->edit_.SetCompactPointer(level, largest);
+        ```
+  
+  + 如果不是主动触发的，并且`level`中的输入文件与`level+1`中无重叠，且与`level + 2`中重叠不大于 `20M`，直接将文件移到`level+1`中
+  
+  + 否则调用`DoCompactionWork`进行`Compact`输入文件
+  
+    + `versions_->MakeInputIterator`创建一个可以遍历两个`level`文件的[迭代器](https://zhuanlan.zhihu.com/p/45661955)
+    + `mutex_.Unlock();`：真正做`compaction`时会释放`DB`的锁
+    + 如果有`immutable memtable`存在，首先调用`CompactMemTable`函数进行`compact`。
+    + `ShouldStopBefore`：每次做`compaction`时都会判断如果目前 `compact` 生成的文件，会导致接下来 l`evel + 1 && level + 2` 层 `compact` 压力过大，那么结束本次 `compact`
+    + 获取迭代器当前指向的`entry`的`key`值，将`key`解码，`key`和之前的`key`重复且之前的`key`的`sequence number`比`smallest_snapshot`要小则丢弃这个`key`，因为既然之前重复的`key`的`sequence number`都比`smallest_snapshot`要小，当前`key`也肯定小，`key`标记为删除且之后的`level`中不存在这个`key`（也就是说这个`key`的删除不会影响到之后）也丢弃这个`key`。
+    + 整体过程大致就是不断的创建新的`sstable`文件，将不用丢弃的key对应的项填入，当文件大小超过限制（默认`2M`）又重新新建`sstable`文件。
+    + `InstallCompactionResults`：
+      + 标记要删除和新增的文件添加到`versions_`中，将`version_edit + version_`信息写入`MANIFEST`
+  
+  + `DeleteObsoleteFiles`：删除过期的文件
+  
+  + 至此`DBImpl::BackgroundCompaction()`结束
+  
++ 再调用一次`MaybeScheduleCompaction();`可能之前在一个level中产生了太多的文件，所以再调用一次。
+
++ `background_work_finished_signal_.SignalAll();`
 
 ### 实现
 
@@ -609,6 +673,8 @@ inline uint32_t DecodeFixed32(const char* ptr) {
 + `compact` 过程中会有一系列改变当前 `Version` 的操作（`FileNumber` 增加，删除 `input` 的 `sstable`，增加输出的 `sstable`……），为了缩小 `Version` 切换的时间点，将这些操作封装成 `VersionEdit`，`compact`完成时，将 `VersionEdit` 中的操作一次应用到当前 `Version` 即可得到最新状态的 `Version`
 
 + `TableCache`内部使用`LRUCache`缓存所有的`table`对象，实际上其内容是文件编号`{file number, TableAndFile*}`
+
++ `kMaxSequenceNumber`为`((0x1ull << 56) - 1)`，留了一个字节方便和`type`放在一起
 
 ## Bigtable
 
