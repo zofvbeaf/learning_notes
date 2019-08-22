@@ -21,7 +21,7 @@
 
 ## 硬件速度
 
-```
+```bash
 L1 cache reference                            0.5 ns
 Branch mispredict                             5 ns
 L2 cache reference                            7 ns
@@ -35,6 +35,9 @@ Disk seek                                     10,000,000 ns
 Read 1 MB sequentially from network           10,000,000 ns         10 ms
 Read 1 MB sequentially from disk              30,000,000 ns
 Send packet CA->Netherlands->CA               150,000,000 ns
+
+# 陷内核  3 ~ 4 us
+# 寄存器访问  0.3 ns
 ```
 
 ## 服务器配置
@@ -75,7 +78,7 @@ NUMA node1 CPU(s):     1,3,5,7,9,11,13,15
 
 + 参考**《x64 cheatsheet》**，[Guide to x86-64](https://web.stanford.edu/class/archive/cs/cs107/cs107.1196/guide/x86-64.html)
 
-+ `stack pointer`：`sp`（16位），`esp`（32位），`rsp`（64位），指向栈顶
++ `stack pointer`：`sp`（16位），`esp`（32位），`rsp`（64位），指向栈顶，不断有元素入栈会不断更改
 
 + `base pointer`：`rbp`（栈基址指针）,指向栈帧的基址
 
