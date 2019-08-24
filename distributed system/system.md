@@ -11,7 +11,7 @@
 + `GFS`和应用程序`API` `co-design`
 + `GFS`宽松的一致性模型和原子记录追加（无需额外的同步） 减轻了应用程序的负担
 + 高吞吐比低延迟更重要
-+ `chunk`的默认大小为`64M`，选择大`chunk`块的理由：
++ `chunk`的默认大小为`64M`，选择大`chunk`块的理由
   + 减少了客户端和`Master`节点通讯的需求
   + 采用较大的`Chunk`尺寸，客户端能够对一个块进行多次操作，这样就可以通过与`Chunk`服务器保持较长时间的`TCP`连接来减少网络负载
   + 选用较大的`Chunk`尺寸减少了`Master`节点需要保存的元数据的数量。这就允许我们把元数据全部放在内存中
@@ -22,6 +22,7 @@
 + 其它：
   + `snapshot`：对文件和目录树的快速`copy`
   + `record append` ：记录追加，原子性的，无需同步锁
++ `GFS`不支持`ls`，文件元数据组织是通过把全部路径名与元数据映射到`map`中，并且路径名做了前缀压缩。
 
 ### 架构
 
@@ -142,8 +143,8 @@
 ### Namespace management & locking
 
 + `GFS`不支持对目录和文件的别名（`unix`系统中的软链接和硬链接），也没有类似于`inode`的数据结构，因此对于一个文件的操作就没有必要获得其读写锁来防止修改，光是读取锁就可以防止父目录被删除
-+ 如果一个写操作包含`/d1/d2/.../dn/leaf`，必须首先获得目录`/d1，/d1/d2，...，/d1/d2/.../dn` 的读取锁，以及全路径`/d1/d2/.../dn/leaf` 的读写锁
-+ `/home/user`被快照到`/save/user`时如和防止创建时在`/home/user`下创建文件
++ 如果一个操作包含`/d1/d2/.../dn/leaf`，必须首先获得目录`/d1，/d1/d2，...，/d1/d2/.../dn` 的读取锁，以及全路径`/d1/d2/.../dn/leaf` 的读锁（若为读操作）或写锁（若为写操作）
++ `/home/user`被快照到`/save/user`时如和防止创建在`/home/user/foo`
   + 快照：`/home`和`/save`的读锁、`/home/user`和`/save/user`的写锁
   + 创建：`/home`和`/home/user`的读锁、`/home/user/foo`的写锁
 
@@ -172,13 +173,33 @@
   + 快速恢复：操作日志 、快照
   + `Chunk` 复制：每个`chunk`都有多份远程副本
   + `Master`复制：操作日志和快照在多台机器上有副本
-    + `Shadow Master`
+    + `Shadow Master`负责从`Master`拉取操作日志来更新自己的数据结构，并且也会周期性和`chunk server`握手来确定它们的状态
 + 数据完整性：
   + 每个`chunkserver`使用`checksum`来检查数据是否损坏
   + `Checksum`对读操作的性能影响较小
   + 覆盖写操作：写前先读取和校验第一个和最后一个块
   + `Chunkserver`空闲时扫描和校验每个不活动的`chunk`的内容
 + 诊断日志：记录所有`RPC`调用
+
+## HDFS
+
+### HDFS 1.x 架构
+
+![](http://ww1.sinaimg.cn/large/77451733ly1g69av2ia3xj20fe08j77j.jpg)
+
++ 采用`master/slave`架构，一个`HDFS`集群包含一个`NameNode`和多个`DataNode`，还有一个`secondary namenode`
++ `NameNode`
+  + 负责管理整个系统的元数据，包括：
+    + 目录树结构，真实的目录树结构，不同于`GFS`，能够支持`ls`的功能
+    + 文件到数据块 `Block` 的映射关系；
+    + `Block` 副本及其存储位置等管理数据
+    + `DataNode` 的状态监控，两者通过段时间间隔的心跳来传递管理信息和数据信息，通过这种方式的信息传递，`NameNode` 可以获知每个 `DataNode` 保存的 `Block` 信息、`DataNode` 的健康状况、命令 `DataNode` 启动停止等（如果发现某个 `DataNode` 节点故障，`NameNode` 会将其负责的 `block` 在其他 `DataNode` 上进行备份）
+  + 这些数据保存在内存中，同时在磁盘保存两个元数据管理文件，`fsimage` 和 `editlog`
+    + `fsimage` ：内存命名空间元数据在外存的镜像文件
+    + `editlog`：各种元数据操作的 `write-ahead-log` 文件，在内存数据变化前首先会将操作记入 `editlog` 中，以防止数据丢失
++ `Secondary NameNode`
+  + `Secondary NameNode` 并不是 `NameNode` 的热备机，而是定期从 `NameNode` 拉取 `fsimage` 和 `editlog` 文件，并对两个文件进行合并，形成新的 `fsimage` 文件并传回 `NameNode`，这样做的目的是减轻 `NameNode` 的工作压力，本质上 `SNN` 是一个提供检查点功能服务的服务点
+  + 
 
 ## leveldb
 
@@ -196,7 +217,7 @@
 + `memtable`
 
   + `leveldb`的一次写入操作并不是直接将数据刷新到磁盘文件，而是首先写入到内存中作为代替，`memtable`就是一个在内存中进行数据组织与维护的结构。
-  + `memtable`中，所有的数据按用户定义的排序方法排序之后**按序存储**，等到其存储内容的容量达到阈值时（默认为`4MB`），便将其转换成`immutable memtable`，与此同时创建一个新的`memtable`，供用户继续进行读写操作。
+  + `memtable`中，所有的数据按用户定义的排序方法排序之后**按序存储**，等到其存储内容的容量达到阈值时（默认为`option.write_buffer_size = 4MB`），便将其转换成`immutable memtable`，与此同时创建一个新的`memtable`，供用户继续进行读写操作。
   + `memtable`底层使用跳表。
 
 + `immutable memtable`
@@ -213,8 +234,8 @@
 
 + `sstable`
 
-  + 内存中的数据达到一定容量，就需要将数据持久化到磁盘的`sstable`中。
-  + `leveldb`后台会定期整合这些`sstable`文件，该过程也称为`compaction`。
+  + 内存中的数据达到一定容量，就需要将数据持久化到磁盘的`sstable`中
+  + `leveldb`后台会定期整合这些`sstable`文件，该过程也称为`compaction`
   + 随着`compaction`的进行，`sstable`文件在逻辑上被分成若干层，由内存数据直接`dump`出来的文件称为`level 0`层文件，后期整合而成的文件为`level i` 层文件
   + 所有的`sstable`文件本身的内容是**不可修改**的
 
@@ -255,8 +276,8 @@
 + `WriteBatch->rep_`的`header`为`12B`，`seq_number(8B) | count(4B) | kTypeValue(1B) | key_len(最多5B) | key | value_len | value`
 + 前`12B`被调用`string::resize(12)`初始化为`0`
   + `seq_number`：`WriteBatch::Put`时未设置
-  + `count`：每次插入一个一条记录值时会加1
-  + `kTypeValue`：若是删除操作则为`kTypeDeletion`，占`1B`，这个字节是被`push_back`进去的，在memtable中改为`seq`占`7B`，`type`占`1B`
+  + `count`：每次插入一个一条记录值时会加`1`
+  + `kTypeValue`：若是删除操作则为`kTypeDeletion`，占`1B`，这个字节是被`push_back`进去的，在`memtable`中改为`seq`占`7B`，`type`占`1B`
   + `key_len`：编码为`Varint32`
   + `key`：原始内容
   + `value_len`与`value`的处理方式与`key`一样，`type`为`kTypeDeletion`时没有这两个字段
@@ -269,14 +290,14 @@
   +  `DBImpl::MakeRoomForWrite`
     + 当`level0`的文件大于等于`8`个时，会睡眠`1ms`
       + `std::this_thread::sleep_for(std::chrono::microseconds(1000));`
-    + 当内存使用小于等于`options_.write_buffer_size`即`4M`时表示memtable的空间够用
+    + 当内存使用小于等于`options_.write_buffer_size`即`4M`时表示`memtable`的空间够用
       + `Memtable`中分配内存都是通过`arena`来的，所以便于统计
     + 否则若内存不够或`level0`文件太多，等待`background_work_finished_signal_`条件变量，其他线程会做`compaction`
     + 否则新建日志文件，序列号自增，`imm_ = mem_`
       + `has_imm_.store(true, std::memory_order_release);`
-    + 如果`Memtable`内存足够会直接退出。
-  + `BuildBatchGroup`，遍历writers_队列，将多个`WriteBatch`拼在一起，打下不会超过`1M`
-  + `WriteBatch`的`seq`号等于`versions_->LastSequence() + 1`，更新`version_->LastSequence `，这个sequence主要用来记录已经加入到`leveldb`中的`K-V`对（如果类型为`delete`则只有`Key`）的数量
+    + 如果`Memtable`内存足够会直接退出
+  + `BuildBatchGroup`，遍历`writers_`队列，将多个`WriteBatch`拼在一起，大小不会超过`1M`
+  + `WriteBatch`的`seq`号等于`versions_->LastSequence() + 1`，更新`version_->LastSequence `，这个`sequence`主要用来记录已经加入到`leveldb`中的`K-V`对（如果类型为`delete`则只有`Key`）的数量
   + 写日志
   + 插入`memtable`：`writeBatchInternal::InsertInto(updates, mem_);`
     + 通过调用`WriteBatchInternal::InsertInto -> WriteBatch::Iterate(Handler* handler)`实现
@@ -298,7 +319,7 @@
 + 做`compaction`时要确保没有其他线程在对此`DB`做`compaction`，并且`imm_ != nullptr`或某些`level`的 `sstable`需要做`compaction`
 
 + `env_->Schedule(&DBImpl::BGWork, this);`
-  + 若没有后台线程则新建一个，线程不断从`background_work_queue_`队列获取任务，内含要执行的函数的指针和参数。compaction任务即为`DBImpl::BGWork -> DBImpl::BackgroundCompaction() `
+  + 若没有后台线程则新建一个，线程不断从`background_work_queue_`队列获取任务，内含要执行的函数的指针和参数。`compaction`任务即为`DBImpl::BGWork -> DBImpl::BackgroundCompaction() `
   + 后台线程在没有任务时就`wait`在条件变量上，有任务下发时主线程会调用`signal`通知，因为主线程是先往队列里下发任务再释放`mutex`锁的，所以线程醒来会获取到锁并且能读到任务
   
 + `DBImpl::BackgroundCompaction()`的主要流程
@@ -556,10 +577,6 @@ class DBImpl : public DB {
 + 新建`impl->logfile_`，序列号通过`impl->versions_->NewFileNumber()`获取，从`2`开始递增
 + 新建`MemTable`，`impl->mem_ = new MemTable`，对其引用计数`+1`
 + `MaybeScheduleCompaction`
-
-#### TableBuilder
-
-+ 
 
 #### 缓存系统
 

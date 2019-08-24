@@ -355,7 +355,7 @@ enum zone_type {
 ### ptmalloc
 
 + `ptmalloc`通过`mmap`或brk（仅`main_arena`使用）每次批发`64MB`大小的内存（称为`heap`）来管理。
-+ `ptmalloc`中有多个`arena`，即`struct malloc_state`。只有一个main_arena，其它的`arena`是动态分配的，但数量有上限，这些`arena`以链表的形式组织。分配内存找`arena`时可能会逐个对空闲的`arena`进行`try_lock`。
++ `ptmalloc`中有多个`arena`，即`struct malloc_state`。只有一个`main_arena`，其它的`arena`是动态分配的，但数量有上限，这些`arena`以链表的形式组织。分配内存找`arena`时可能会逐个对空闲的`arena`进行`try_lock`。
 + 每个`arena`管理多个`heap`。每个`heap`通过`prev`指针连接起来，`arena->top`指向最近分配的`heap`中的，未分配给用户的，包含了`heap`尾部的那个`chunk`。通过`arena->top`，能够找到最近的那个`heap`。通过最近的那个`heap`的`prev`指针，能够依次找到以前所有的`heap`。
 + `heap`释放时会出现某一个`heap`未全部空闲则该heap前面的空闲的`heap`无法得到释放的问题。
 + 用户请求的空间都用`chunk`来表示。
@@ -365,8 +365,8 @@ enum zone_type {
 + `chunk`被分配出去时，其在空闲链表中的前后指针以及前后`chunk size`的字段会被复用给用户作为空闲区域。
 + 每个线程有`tcache`，并且每个线程有一个`thread_arena`指向当前线程正在使用的`arena`。
 + `unsorted bin`可以看作`small bin`和`large bin`的缓冲，链表头是`bins[1]`。`fastbin`中的空闲`chunk`合并时会先放到`unsorted bin`中。分配时检查`unsorted bin`没有合适的chunk就会将`unsorted bin`中的chunk放到`small bin`或`large bin`中。
-+ `small bin`中的chunk大小范围为`32B~1088B`（以`16B`递增，共`62`个`bin`链表，`bin[2]~bin[63]`）。
-+ `large bin`中的chunk大小范围为`1024B`以上。
++ `small bin`中的`chunk`大小范围为`32B~1088B`（以`16B`递增，共`62`个`bin`链表，`bin[2]~bin[63]`）。
++ `large bin`中的`chunk`大小范围为`1024B`以上。
 + 另外，每个线程有一个`tcache`，共64项，从最小的32字节开始，以`16`字节为单递增。
 + 链表操作通过`CAS`，`arena`争用需要加锁。
 
@@ -1182,6 +1182,12 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
   + 开销比普通函数调用大的地方：
     + 需要设置各种寄存器、切换权限等级，各种检查
 
+### 用户态到内核态的切换
+
++ 有三种方式，包括中断、异常和系统调用
++ 根据相应中断异常门的设置，切换内核堆栈，切换cs，权限变成0级，即内核态。`rip`则改成门里设置的值。
++ 系统调用，现在用`syscall`指令，在指令也会进入内核态，切换`cs/rip`，切换堆栈。这个设置有另外的寄存器设置，而不是通过门来设置
+
 ## 信号
 
 + 信号是软中断。信号定义在`bits/signum.h`中
@@ -1197,6 +1203,13 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 ## IO管理
 
 ## 中断和异常
+
++ 中断是一种电信号，由硬件设备产生，并通过中断控制器传递给处理器，处理器一经检测到此信号就中断自己当前的工作转而处理中断，内核对每一种中断都有一个中断处理函数，这些中断处理程序是设备驱动的一部分。
++ 中断处理程序运行于中断上下文中，一般把中断处理分为上半部和下半部，其中上半部不可被中断。在接收到中断后上半部就会被立刻执行，但只做有严格时限的工作，例如对接收中断进行应答或复位硬件
+  + 以网卡中断为例，中断处理程序负责把网卡缓存的数据拷贝到内存中防止网卡缓冲区溢出
++ `linux`中的中断处理程序是无须重入的，当一个给定的中断处理程序正在执行时，**相应的中断线在所有处理器上都会被屏蔽掉**，以防止在同一中断线上接收另一个中断。通常情况下，所有其他的中断都是打开的，所以这些不同中断线上的其他中断都能被处理，但当前中断线总是被禁止的。由此可以看出，同一个中断处理程序绝对不会被同时调用以处理嵌套的中断
++ 可以通过`request_irq(irq, handler, flags, dev)`接口提供`irq`即中断号和`handler`即中断处理程序指针等信息来注册中断出来程序，一个中断线上可以注册多个处理程序，中断发生时会轮流调用它们，另外也会检查硬件设备的状态寄存器看是不是真的发生了中断
++ 
 
 ### [中断、异常和陷入](https://www.cnblogs.com/johnnyflute/p/3765008.html)
 
