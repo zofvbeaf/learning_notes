@@ -582,50 +582,11 @@ struct task_struct {
 
 ### 线程相关
 
++ 线程的栈空间是主线程`mmap`出来的一块区域，且同一进程下的所有线程指向的`mm_struct`都是同一个，所以原则上是一共线程是可以访问到另一个线程的栈上的地址的内容
+
 ```c++
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start_routine) (void *), void *arg);
-pthread_attr_init(3), 
-pthread_atfork(3), 
-pthread_cancel(3), 
-pthread_cleanup_push(3), 
-pthread_cond_signal(3),
-pthread_cond_wait(3), 
-pthread_create(3), 
-pthread_detach(3), 
-pthread_equal(3), 
-pthread_exit(3), 
-pthread_key_create(3), 
-pthread_kill(3), 
-pthread_mutex_lock(3),
-pthread_mutex_unlock(3), 
-pthread_once(3), 
-pthread_setcancelstate(3), 
-pthread_setcanceltype(3), 
-pthread_setspecific(3), 
-pthread_sigmask(3), 
-pthread_sigqueue(3), 
-pthread_testcancel(3)
-    
-pthread_cond_signal
-pthread_cond_wait
-pthread_cond_broadcast
-pthread_mutex_lock
-pthread_mutex_init
-pthread_mutex_destroy
-
-pthread_spin_init
-pthread_spin_lock
-pthread_spin_trylock
-pthread_spin_destroy
-pthread_spin_unlock
-
-pthread_rwlock_init
-pthread_rwlock_destroy
-pthread_rwlock_rdlock
-pthread_rwlock_wrlock
-pthread_rwlock_timedrdlock
-
 ```
 
 + [线程底部实现](http://yangxikun.com/linux/2013/11/27/process-and-thread.html)调用`clone()`系统调用，线程同步采用`futex()`系统调用。
@@ -1204,12 +1165,143 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 ## 中断和异常
 
-+ 中断是一种电信号，由硬件设备产生，并通过中断控制器传递给处理器，处理器一经检测到此信号就中断自己当前的工作转而处理中断，内核对每一种中断都有一个中断处理函数，这些中断处理程序是设备驱动的一部分。
-+ 中断处理程序运行于中断上下文中，一般把中断处理分为上半部和下半部，其中上半部不可被中断。在接收到中断后上半部就会被立刻执行，但只做有严格时限的工作，例如对接收中断进行应答或复位硬件
-  + 以网卡中断为例，中断处理程序负责把网卡缓存的数据拷贝到内存中防止网卡缓冲区溢出
++ 中断是一种电信号，由硬件设备产生，并通过中断控制器传递给处理器，处理器一经检测到此信号就中断自己当前的工作转而处理中断，对于每条中断线，处理器都会跳到对应的一个唯一的位置，这样内核就可以知道所接受的中断号的`IRQ`号了，然后内核在栈中保存这个号并且保存被中断进程的寄存器信息，之后调用`do_IRQ()`函数，禁止这条线上的中断传递，之后调用`handle_IRQ_event()`来运行为这条中断线安装的中断处理程序
+
++ 如果设置了`need_resched`标志，中断返回时会检查，若中断的是用户进程，那么处理完后会调用`schedule()`，若中断的是内核本身，那么会检查是否`preempt_count`为`0`在决定是否调用`schedule()`，否则抢占内核是不安全的
+
++ 中断处理程序是设备驱动的一部分，它是异步的
+
+  + 同步中断表示由`cpu`内部的电信号产生的中断，其特点为当前执行的指令结束后才转而产生中断，由于有cpu主动产生，其执行点必然是可控的
+    + 同步中断也称为异常，要么是代码错误引起的，此时`cpu`通过发送相关的信号来处理异常（通常可能是杀死进程的信号）；要么是`cpu`必须处理的一些异常条件，此时`cpu`执行异常处理函数来恢复异常。
+  + 异步中断是由`cpu`的外设产生的电信号引起的中断，其发生的时间点不可预期
+
++ 由当前进程切换到中断执行实际上并不是进程切换，中断的执行只是一个内核执行的路径，这个执行路径实际上仍然代表着当前进程在执行，当前进程的时间片在增长，看上去进程执行的花费变长了
+
++ `/proc/interrupts`可以看到与中断相关的统计信息
+
+  ```bash
+  $ cat /proc/interrupts 
+             CPU0       
+    0:         16   IO-APIC   2-edge      timer
+    1:         10   IO-APIC   1-edge      i8042
+    6:          3   IO-APIC   6-edge      floppy
+    8:          0   IO-APIC   8-edge      rtc0
+    9:          0   IO-APIC   9-fasteoi   acpi
+   11:         34   IO-APIC  11-fasteoi   virtio3, uhci_hcd:usb1
+   12:         15   IO-APIC  12-edge      i8042
+   14:          0   IO-APIC  14-edge      ata_piix
+   15:   17849590   IO-APIC  15-edge      ata_piix
+   #中断线  中断次数  中断控制器               devname
+  ```
+
++ 中断处理程序运行于中断上下文中，一般把中断处理分为上半部和下半部，其中上半部不可被中断。在接收到中断后上半部就会被立刻执行，但只做有严格时限的工作，例如对接收中断进行应答或复位硬件，注册的中断处理程序就是上半部
+
+  + 以网卡中断为例，中断处理程序（即上半部）负责把网卡缓存的数据拷贝到内存中防止网卡缓冲区溢出
+
++ 中断上下文
+
+  + 不同于进程上下文，中断上下文和进程没有什么联系，因为没有后备进程，所以中断上下文不可以睡眠，否则又怎能再对它重新调度呢？因此，不能从中断上下文中调用某些可能会导致睡眠的函数
+  + 中断上下文具有较为严格的时间限制，因为它打断了其他代码，甚至可能打断了其他中断线上的另一中断处理程序
+    + 中断程序的栈为每个处理器一个，大小为两个物理页框（`8KB`），代码位于`arch/x86/kernel/irq_32.c:irq_ctx_init()`，并且是`softirq`和`hardirq`各`8KB`
+
 + `linux`中的中断处理程序是无须重入的，当一个给定的中断处理程序正在执行时，**相应的中断线在所有处理器上都会被屏蔽掉**，以防止在同一中断线上接收另一个中断。通常情况下，所有其他的中断都是打开的，所以这些不同中断线上的其他中断都能被处理，但当前中断线总是被禁止的。由此可以看出，同一个中断处理程序绝对不会被同时调用以处理嵌套的中断
+
 + 可以通过`request_irq(irq, handler, flags, dev)`接口提供`irq`即中断号和`handler`即中断处理程序指针等信息来注册中断出来程序，一个中断线上可以注册多个处理程序，中断发生时会轮流调用它们，另外也会检查硬件设备的状态寄存器看是不是真的发生了中断
-+ 
+
+### 下半部
+
++ 中断处理程序是上半部，内核通过对它的异步执行完成对硬件中断的即时响应，一般对时间敏感、和硬件相关或需要不能被其他中断（尤其是相同中断）打断的情况都在上半部执行
++ 下半部执行的时候允许响应所有中断
++ 内核提供了三种不同形式的下半部实现机制：软中断、`tasklet`和工作队列
+  + 另外，内核定时器可以实现吧操作推迟到某个确定的时间段之后执行
+  + **并不是所有下半部机制都是软中断**
+
+#### 软中断
+
++ 软中断用的比较少，`tasklet`是下半部更常用的一种方式，`tasklet`是通过软中断实现的
+
++ 软中断是在编译期间静态分配的，它不像`tasklet`那样能被动态地注册或注销。软中断由`softirq_action`结构表示
+
+  ```c
+  // include/linux/interrupt.h
+  struct softirq_action
+  {
+  	void  (*action)(struct softirq_action *);
+  };
+  
+  enum
+  {
+      HI_SOFTIRQ=0,   // 处理高优先级tasklet
+      TIMER_SOFTIRQ,  // 和时钟中断相关的tasklet
+      NET_TX_SOFTIRQ, // 把数据包传送到网卡
+      NET_RX_SOFTIRQ, // 从网卡接受数据包
+      BLOCK_SOFTIRQ,  // 块设备软中断
+      BLOCK_IOPOLL_SOFTIRQ, // 支持IO轮询的块设备软中断
+      TASKLET_SOFTIRQ,  // 处理常规的IRQ
+      SCHED_SOFTIRQ,    // 调度程序软中断
+      HRTIMER_SOFTIRQ,  // 高精度计时器软中断
+      RCU_SOFTIRQ,    // RCU锁软中断
+      NR_SOFTIRQS // 	当前Linux内核允许注册的最大软中断数
+  };
+  
+  // kernel/softirq.c 
+  static struct softirq_action softirq_vec[NR_SOFTIRQS]; // 10 个
+  
+  // 调用方式
+  my_softirq->action(my_softirq)
+  ```
+
+  + 一个软中断的优先级是相应`softirq_action`元素在`softirq_vec`数组的下标
+  + 现在是只有`10`个软中断，`2.6.28`以前版本的内核的声明代码为`softirq_vec[32]`，所以旧版本有`32`个，但只用到了`9`个
+
++ 一个软中断不会抢占另外一个软中断，实际上唯一可以抢占软中断的是中断处理程序，不过其他的软中断（甚至是相同类型的软中断）可以在其他处理器上同时执行
+
++ 通常，中断处理程序会在它返回前标记它的软中断，使其在稍后在被执行，在下列地方，待处理的软中断会被检查和执行：
+
+  + 从一个硬件中断代码出返回时
+  + 在`ksoftirqd`线程中，对每个处理器都会有一个`ksoftirqd/n`线程，`n`代表处理器编号，从`0`开始
+    + 内部实现就是不断的判断是否有待处理的软中断，有的话就调用`do_softirq()`处理他们
+  + 在那写显式检查和执行待处理的软中断的代码中，如网络子系统中
+
++ 软中断可以并发运行在多个`CPU`上（即使同一类型的也可以）。所以软中断必须设计为可重入的函数（允许多个`CPU`同时操作），因此也需要使用自旋锁来保护其数据结构
+
++ 产生后并不是马上可以执行，必须要等待内核的调度才能执行。软中断不能被自己打断，只能被硬件中断打断（上半部）
+
+#### tasklet
+
++ `tasklet`是通过软中断实现的，本身也是软中断，但它的接口更简单，锁保护要求也较低。通常情况下，我们使用`tasklet`而不是软中断，使用软中断的情况屈指可数
+
+  + `tasklet`可以动态增加减少，没有数量限制，同一类`tasklet`不能并发执行
+  + 软中断是静态分配的，在内核编译好之后，就不能改变。但`tasklet`就灵活许多，可以在运行时改变（比如添加模块时）
+
++ 对应的数据结构为
+
+  ```c
+  struct tasklet_struct{
+      struct tasklet_struct *next;    // 链表中下一个tasklet
+      unsigned long state;            // tasklet状态, TASKLET_STATE_RUN表示正在运行
+      atomic_t count;                 // 原子操作的计数器
+      void (*func)(unsigned long);    // tasklet处理函数
+      unsigned long data;             // 给处理函数的参数
+  }
+  ```
+
++ 因为是靠软中断实现，所以`tasklet`不能睡眠，所有不能使用信号量或其他什么阻塞式函数，可以使用`per_cpu`变量来避免多处理器访问同一个变量时需要加锁，如果要加锁也需用自旋锁
+
++ `tasklet`处理时会先禁止中断，然后检索当前处理器的`tasklet_vec`或`tasklet_hig_vec`链表，并将其置为`NULL`，然后中断再逐个处理这些`tasklet`
+
+  + 执行时会先检查并设置`state`和引用计数，这样当`tasklet`已经被处理或正在处理时就不会再处理
+
+#### 工作队列
+
++ 工作队列和其他形式不同，它可以把工作退后，交由一个内核线程去执行：
+  + 这个下半部分总是会在进程上下文中执行，另外两个都是再中断上下文中
+  + 工作处理函数，默认情况下，允许响应中断，并且不持有任何锁，如果需要，可以睡眠
+  + 工作对列的开销最大，因为它要牵扯到内核线程甚至是上下文切换 
++ 工作队列允许重新调度甚至是睡眠，是否选择工作队列就看推后执行的任务是否需要睡眠
++ 从`top`命令可以看到许多`kworker/n`线程，每个处理器都会有，它就是工作者线程，有些是默认的工作者线程，驱动程也可以创建自己的工作者线程
+  + 这个内核线程是不能访问用户空间的，通常在发生系统调用时，内核会代表用户空间的进程运行，此时它才能访问用户空间
++ 工作链表是空的时，工作者线程会调用`schedule()`进入睡眠状态，链表不为空时会被唤醒去处理
 
 ### [中断、异常和陷入](https://www.cnblogs.com/johnnyflute/p/3765008.html)
 
@@ -1506,19 +1598,19 @@ int mkfifoat(int dirfd, const char *pathname, mode_t mode);
 
 + `RCU(Read-Copy Update)`，是 Linux 内核实现的一种针对“读多写少”的共享数据的同步机制。不同于其他的同步机制，它允许多个读者同时访问共享数据，而且读者的性能不会受影响（“随意读”），读者与写者之间也不需要同步机制（但需要“复制后再写”），但如果存在多个写者时，在写者把更新后的“副本”覆盖到原数据时，写者与写者之间需要利用其他同步机制保证同步。
 
-+ RCU并不是针对单个数据，而是表示当前线程处于rcu_lock状态，其它线程在`grace period`内的写操作都会做复制，在`grace period`后更新原来的值。
++ `RCU`并不是针对单个数据，而是表示当前线程处于`rcu_lock`状态，其它线程在`grace period`内的写操作都会做复制，在`grace period`后更新原来的值。
 
-+ 读者在访问被RCU保护的共享数据期间不能被阻塞，这是RCU机制得以实现的一个基本前提，也就说当读者在引用被RCU保护的共享数据期间，读者所在的CPU不能发生上下文切换，spinlock和rwlock都需要这样的前提。
++ 读者在访问被`RCU`保护的共享数据期间不能被阻塞，这是RCU机制得以实现的一个基本前提，也就说当读者在引用被`RCU`保护的共享数据期间，读者所在的CPU不能发生上下文切换，`spinlock`和`rwlock`都需要这样的前提。
 
-+ 写者在访问被RCU保护的共享数据时不需要和读者竞争任何锁，只有在有多于一个写者的情况下需要获得某种锁以与其他写者同步。
++ 写者在访问被`RCU`保护的共享数据时不需要和读者竞争任何锁，只有在有多于一个写者的情况下需要获得某种锁以与其他写者同步。
 
   + 写者修改数据前首先拷贝一个被修改元素的副本，然后在副本上进行修改，修改完毕后它向垃圾回收器注册一个回调函数以便在适当的时机执行真正的修改操作。等待适当时机的这一时期称为`grace period`，而CPU发生了上下文切换称为经历一个`quiescent state`，`grace period`就是所有CPU都经历一次`quiescent state`所需要的等待的时间。垃圾收集器就是在grace period之后调用写者注册的回调函数来完成真正的数据修改或数据释放操作的。
 
-+ RCU 的一个典型的应用场景是链表，提供了利用 RCU 机制对链表进行增删查改操作的接口。
++ `RCU` 的一个典型的应用场景是链表，提供了利用 `RCU` 机制对链表进行增删查改操作的接口。
 
   + 写者要从链表中删除元素 B，它首先遍历该链表得到指向元素 B 的指针，然后修改元素 B 的前一个元素的 next 指针指向元素 B 的 next 指针指向的元素C，修改元素 B 的 next 指针指向的元素 C 的 prep 指针指向元素 B 的 prep指针指向的元素 A。
   + 在这期间可能有读者访问该链表，修改指针指向的操作是原子的，所以不需要同步，而元素 B 的指针并没有去修改，因为读者可能正在使用 B 元素来得到下一个或前一个元素。
-  + 写者完成这些操作后注册一个回调函数以便在 `grace period` 之后删除元素 B，然后就认为已经完成删除操作。垃圾收集器在检测到所有的CPU不在引用该链表后，即所有的 CPU 已经经历了 `quiescent state`,`grace period` 已经过去后，就调用刚才写者注册的回调函数删除了元素 B。
+  + 写者完成这些操作后注册一个回调函数以便在 `grace period` 之后删除元素 B，然后就认为已经完成删除操作。垃圾收集器在检测到所有的CPU不在引用该链表后，即所有的 `CPU` 已经经历了 `quiescent state`,`grace period` 已经过去后，就调用刚才写者注册的回调函数删除了元素 B。
 
   ![](http://ww1.sinaimg.cn/large/77451733gy1g4vnfid05lj2060052t8l.jpg)
 
@@ -1529,12 +1621,6 @@ int mkfifoat(int dirfd, const char *pathname, mode_t mode);
 ###  [futex](https://yq.aliyun.com/articles/6043)
 
 > Futex按英文翻译过来就是**快速用户空间互斥体**。其设计思想其实 不难理解，在传统的Unix系统中，System V IPC(inter process communication)，如 semaphores, msgqueues, sockets还有文件锁机制(flock())等进程间同步机制都是对一个内核对象操作来完成的，这个内核对象对要同步的进程都是可见的，其提供了共享 的状态信息和原子操作。当进程间要同步的时候必须要通过系统调用(如semop())在内核中完成。可是经研究发现，很多同步是无竞争的，即某个进程进入 互斥区，到再从某个互斥区出来这段时间，常常是没有进程也要进这个互斥区或者请求同一同步变量的。但是在这种情况下，这个进程也要陷入内核去看看有没有人 和它竞争，退出的时侯还要陷入内核去看看有没有进程等待在同一同步变量上。这些不必要的系统调用(或者说内核陷入)造成了大量的性能开销。为了解决这个问 题，Futex就应运而生，Futex是一种用户态和内核态混合的同步机制。首先，同步的进程间通过mmap共享一段内存，futex变量就位于这段共享 的内存中且操作是原子的，当进程尝试进入互斥区或者退出互斥区的时候，先去查看共享内存中的futex变量，如果没有竞争发生，则只修改futex,而不 用再执行系统调用了。当通过访问futex变量告诉进程有竞争发生，则还是得执行系统调用去完成相应的处理(wait 或者 wake up)。简单的说，futex就是通过在用户态的检查，**（motivation）如果了解到没有竞争就不用陷入内核了，大大提高了low-contention时候的效率**。 Linux从2.5.7开始支持Futex。
-
-## 线程相关
-
-> `pthread`各种东西均为`glibc`中的实现。
-
-+ 
 
 ## 其它
 
