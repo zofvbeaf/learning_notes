@@ -22,7 +22,7 @@
 
 ### BindNameToNode
 
-+ 主要是用于检查`SelectStatement`中涉及的列的合法性，并将列的属性（如属于哪一张表）填入各表达式。
++ 主要是用于检查`SelectStatement`中涉及的列的合法性，并将列的属性（如属于哪一张表）填入各表达式
 
 ### BuildPelotonPlanTree
 

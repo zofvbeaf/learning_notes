@@ -236,32 +236,122 @@ int upper_bound(std::vector<int>& data, int k) {
 #### quick_sort
 
 ```c++
+// start = 0, end = a.size()
 void quick_sort(vector<int>& a, int start, int end) {
-    int left = start, right = end;
-    int pivotal = a[start];
-    while(left < right) {
-        while(left < right && a[right] >= pivotal) {
-            --right;
-        }
-        a[left] = a[right];
-        while(left < right && a[left] < pivotal) {
-            ++left;
-        }
-        a[right] = a[left];
+  if(start >= end-1) return;
+  int left = start, right = end-1;
+  int pivotal = a[start];
+  while(left < right) {
+    while(left < right && a[right] >= pivotal) --right;
+    a[left] = a[right];
+    while(left < right && a[left] <= pivotal) ++left;
+    a[right] = a[left];
+  }
+  a[left] = pivotal;
+  quick_sort(a, start, left);
+  quick_sort(a, right+1, end);
+}
+```
+
+#### merge_sort
+
+```c++
+void merge_sort_core(vector<int>&a, vector<int>&tmp, int start, int end) {
+  if(start >= end-1) return;
+  int mid = (start+end)>>1;
+  merge_sort_core(a, tmp, start, mid);
+  merge_sort_core(a, tmp, mid, end);
+  tmp = a;
+  int i = start, j = mid, k = start;
+  while(i < mid && j < end) {
+    if(tmp[i] < tmp[j]) a[k++] = tmp[i++];
+    else a[k++] = tmp[j++];
+  }
+  while(i < mid) a[k++] = tmp[i++];
+  while(j < end) a[k++] = tmp[j++];
+}
+// start = 0, end = a.size()
+void merge_sort(vector<int>& a, int start, int end) {
+  vector<int> tmp(a);
+  merge_sort_core(a, tmp, start, end);
+} 
+```
+
+### 二叉树非递归遍历
+
+```c++
+struct TreeNode {
+  TreeNode(int x): left(nullptr), right(nullptr), val(x) { }
+  TreeNode *left, *right;
+  int val;
+};
+// 先序
+void pre_order(TreeNode *root) {
+  if(!root) return;
+  stack<TreeNode*> st;
+  st.push(root);
+  TreeNode *p;
+  while(!st.empty()) {
+    p = st.top();
+    st.pop();
+    // visit(p);
+    if(p->right) st.push(p->right);
+    if(p->left) st.push(p->left);
+  }
+}
+// 中序
+void in_order(TreeNode *root) {
+  if(!root) return;
+  stack<TreeNode*> st;
+  TreeNode *p = root;
+  while(!st.empty() || p != nullptr) {
+    if(p) {
+      st.push(p);
+      p = p->left;
     }
-    a[left] = pivotal;
-    if(left > start)
-      quick_sort(a, start, left-1);
-    if(right < end)
-      quick_sort(a, right+1, end);
+    else {
+      p = st.top();
+      st.pop();
+      // visit(p);
+      p = p->right;
+    }
+  }
+}
+// 后序
+void post_order(TreeNode *root) {
+  if(!root) return;
+  stack<TreeNode*> st;
+  TreeNode *p = root, *q;
+  do {
+    while(p) {
+      st.push(p);
+      p = p->left;
+    }
+    q = nullptr;
+    while(!st.empty()) {
+      p = st.top();
+      st.pop();
+            // 右孩子不存在或已被访问，访问之
+      if(p->right == q) { 
+        // visit(p);
+        q = p;
+      } else {
+        // 当前节点不能访问，需二次进栈
+        st.push(p);
+        // 先处理右子树
+        p = p->right;
+        break;
+      }
+    }
+  } while(!st.empty());
 }
 ```
 
 ### 动态规划
 
-+ 可以得到最优解。
-+ 整体问题的最优解依赖各子问题的最优解。
-+ 这些小问题之间还有相互重叠的更小的子问题。
++ 可以得到最优解
++ 整体问题的最优解依赖各子问题的最优解
++ 这些小问题之间还有相互重叠的更小的子问题
 
 ## 数据结构
 
