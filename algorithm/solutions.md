@@ -2530,6 +2530,162 @@ public:
 };
 ```
 
+#### 单调栈结构
+
+> 给定一个不含有重复数值的数组`arr`，找到每一个`i`位置左边和右边离`i`位置最近且值比`arr[i]`小的位置，返回所有位置相应的信息
+
+```c++
+// 数组元素无重复, 如 { 3 4 1 5 6 2 7 }
+vector<vector<int> > getNearLess(vector<int>& arr) {
+  vector<vector<int> > ans;
+  if(arr.empty()) return ans;
+  ans.resize(arr.size(), vector<int>(2, 0));
+  stack<int> st;
+  for(int i = 0; i < arr.size(); ++i) {
+    while(!st.empty() && arr[st.top()] > arr[i]) {
+      int top_index = st.top();
+      st.pop();
+      int left_less_index = st.empty() ? -1 : st.top();
+      ans[top_index][0] = left_less_index;
+      ans[top_index][1] = i;
+    }
+    st.push(i);
+  }
+  while(!st.empty()) {
+    int top_index = st.top();
+    st.pop();
+    int left_less_index = st.empty() ? -1 : st.top();
+    ans[top_index][0] = left_less_index;
+    ans[top_index][1] = -1;
+  }
+  return ans;
+}
+// 数组元素有重复, 如 { 3 1 3 4 3 5 3 2 2 }
+vector<vector<int> > getNearLessWithRepeat(vector<int>& arr) {
+  vector<vector<int> > ans;
+  if(arr.empty()) return ans;
+  ans.resize(arr.size(), vector<int>(2, 0));
+  stack<list<int> > st;
+  for(int i = 0; i < arr.size(); ++i) {
+    while(!st.empty() && arr[st.top().front()] > arr[i]) {
+      list<int> top_indexs = st.top();
+      st.pop();
+      int left_less_index = st.empty() ? -1 : st.top().back();
+      for(auto& top_index : top_indexs) {
+        ans[top_index][0] = left_less_index;
+        ans[top_index][1] = i;
+      }
+    }
+    if(!st.empty() && arr[st.top().front()] == arr[i]) {
+      st.top().push_back(i);
+    }
+    else {
+      st.push(list<int>(1, i));
+    } 
+  }
+  while(!st.empty()) {
+    list<int> top_indexs = st.top();
+    st.pop();
+    int left_less_index = st.empty() ? -1 : st.top().back();
+    for(auto& top_index : top_indexs) {
+      ans[top_index][0] = left_less_index;
+      ans[top_index][1] = -1;
+    }
+  }
+  return ans;
+}
+```
+
+#### 最大子矩阵的大小
+
+> leetcode 85 Maximal Rectangle
+>
+> 给定一个全是`0`和`1`的二维数组，找出其中最大的全`1`子矩阵中`1`的数量
+
+```c++
+// dp 解法
+class Solution {
+public:
+  int maximalRectangle(vector<vector<char>>& matrix) {
+    if(matrix.empty() || matrix[0].empty()) return 0;
+    int n = matrix.size(), m = matrix[0].size(), ans = 0;
+    vector<int> height(m, 0);
+    vector<int> left(m, 0);
+    vector<int> right(m, m);
+    for(int i = 0; i < n; ++i) {
+      int cur_left = 0, cur_right = m;
+      for(int j = 0; j < m; ++j) {
+        if(matrix[i][j] == '1') ++height[j]; 
+        else height[j] = 0;
+      }
+      for(int j = 0; j < m; ++j) {
+        if(matrix[i][j] == '1') left[j] = max(left[j], cur_left); 
+        else left[j] = 0, cur_left = j+1;
+      }
+      for(int j = m-1; j >= 0; --j) {
+        if(matrix[i][j] == '1') right[j] = min(right[j], cur_right); 
+        else right[j] = m, cur_right = j;
+      }
+      for(int j = 0; j < m; ++j) 
+        ans = max(ans, (right[j]-left[j])*height[j]);
+    }
+    return ans; 
+  }
+};
+// 求出每一行的 height 再用单调栈求以当前行为底边的最大子矩阵
+// 求解单行的解法类似 leetcode 84 柱状图的最大矩形
+// 注意传进来的参数为 char
+class Solution {
+public:
+  int maximalRectangle(vector<vector<char> >& matrix) {
+    if(matrix.empty() || matrix[0].empty()) return 0;
+    int n = matrix.size(), m = matrix[0].size(), ans = 0;
+    vector<int> height(m, 0);
+    for(int i = 0; i < n; ++i) {
+      for(int j = 0; j < m; ++j) {
+        height[j] = matrix[i][j] == '0' ? 0 : (height[j] + 1);
+      }
+      ans = max(ans, maxRecFromBottom(height));
+    }   
+  }
+  
+  int maxRecFromBottom(vector<int>& height) {
+    int m = height.size(), ans = 0;
+    stack<int> st;
+    for(int i = 0; i < height.size(); ++i) {
+      while(!st.empty() && height[i] <= height[st.top()]) {
+        int j = st.top();
+        st.pop();
+        int k = st.empty() ? -1 : st.top();
+        ans = max(ans, (j-k-1)*height[j]);
+      }
+      st.push(i);
+    }
+    while(!st.empty()) {
+      int j = st.top();
+      st.pop();
+      int k = st.empty() ? -1 : st.top();
+      ans = max(ans, (m-k-1)*height[j]);
+    }
+    return ans;
+  }
+};
+```
+
+#### 最大值减去最小值小于或等于num的子数组数量
+
+> 给定数组 `arr` 和整数 `num`,共返回有多少个子数组满足如下情况: 
+> `max(arr[i..j]) - min(arr[i..j]) <= num` 
+> `max(arr[i..j])`表示子数组 `arr[i..j]`中的最大值，`min(arr[i..j])`表示子数组`arr[i..j]`中的最小值
+>
+> 时间复杂度为`O(N)`
+
+```
+
+```
+
+
+
 ### 数组和矩阵问题
 
 #### 在行列都排好序的矩阵中找指定的数
