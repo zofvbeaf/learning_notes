@@ -1596,6 +1596,8 @@ public:
 > 每年六一儿童节,牛客都会准备一些小礼物去看望孤儿院的小朋友,今年亦是如此。HF作为牛客的资深元老,自然也准备了一些小游戏。其中,有个游戏是这样的:首先,让小朋友们围成一个大圈。然后,他随机指定一个数m,让编号为0的小朋友开始报数。每次喊到m-1的那个小朋友要出列唱首歌,然后可以在礼品箱中任意的挑选礼物,并且不再回到圈中,从他的下一个小朋友开始,继续0...m-1报数....这样下去....直到剩下最后一个小朋友,可以不用表演,并且拿到牛客名贵的“名侦探柯南”典藏版(名额有限哦!!^_^)。请你试着想下,哪个小朋友会得到这份礼品呢？(注：小朋友的编号是从0到n-1)
 
 ```c++
+// f(n, m) = 0                     (n = 1)
+// f(n, m) = [f(n-1, m) + m] % n   (n > 1)
 class Solution {
 public:
     int LastRemaining_Solution(int n, int m)
@@ -2680,11 +2682,250 @@ public:
 >
 > 时间复杂度为`O(N)`
 
+```c++
+// 生成两个双端队列，不断求 arr[i..j] 是否满足，若其满足/不满足，则其子数组也满足/不满足
+int getNum(vector<int>& arr, int num) {
+  if(arr.empty() || num < 0) return 0;
+  deque<int> qmin, qmax;
+  int i = 0, j = 0, res = 0;
+  while(i < arr.size()) {
+    while(j < arr.size()) {
+      if(qmin.empty() || qmin.back() != j) {
+        while(!qmin.empty() && arr[qmin.back()] >= arr[j]) qmin.pop_back();
+        qmin.push_back(j);
+        while(!qmax.empty() && arr[qmax.back()] <= arr[j]) qmax.pop_back();
+        qmax.push_back(j);
+      }
+      if(arr[qmax.front()] - arr[qmin.front()] > num) break;
+      ++j;
+    }
+    res += j - i;
+    if(qmin.front() == i) qmin.pop_front();
+    if(qmax.front() == i) qmax.pop_front();
+    ++i;
+  }
+  return res;
+}
 ```
 
+#### 可见山峰对的数量
+
+> 一个不含有负数的数组可以代表一圈环形山，每个位置的值代表山的高度，比如｛3，1，2，4，5｝、｛4，5，3，1，2｝或｛1，2，4，5，3｝都代表同样结构的环形山。3->1->2->4->5->3方向叫做next方向(逆时针)，3->5->4->2->1->3方向叫做last方向叫做last方向（顺时针）
+>
+> 山峰A和山峰B能够相互看见的条件为：
+>
+> 1、如果A和B是同一座山，认为互相看不见
+>
+> 2、如果A和B是不同的山，并且在环中相邻，认为可以相互看见
+>
+> 3、如果A和B是不同的山，并且在环中不相邻，假设两座山高度最小值为min。如果A通过next方向到B的途中没有高度比min大的山峰，或者A通过last方向到B的途中没有高度比min大的山峰，认为A和B可以相互看见
+>
+> 给定一个不含负数数组arr，请返回有多少对山峰可以互相看见
+
+```c++
+// 若数组没有重复值，则有 2n-3 对，即每个节点都从两个方向找第一个比它大的配对，次大仅和最达配对
+// 2(n-2) + 1 = 2n-3
+
+// 若数组有重复值，也按照 小找大 的思路来解
+struct Node {
+  Node(int v): val(v), times(1) { }
+  int val, times;
+};
+
+int nextIndex(int i, int n) {
+  return i < (n - 1) ? (i + 1) : 0; 
+}
+
+// 返回 C(2, k)
+int getInternalSum(int k) {
+  return k == 1 ? 0 : (k*(k-1)/2);
+}
+
+int getVisibleNum(vector<int>& arr) {
+  int n = arr.size();
+  int maxIndex = 0;
+  // 现在环中找到其中一个最大值的位置，哪一个都行
+  for(int i = 0; i < n; ++i) 
+    maxIndex = arr[maxIndex] < arr[i] ? i : maxIndex;
+  stack<Node> st;
+  st.push(Node(arr[maxIndex]));
+  int index = nextIndex(maxIndex, n); // 环形的下一个位置
+  int res = 0;
+  while(index != maxIndex) {
+    // 保持栈的元素自顶到底为递增的
+    while(st.top().val < arr[index]) {
+      int k = st.top().times;
+      st.pop(); // 弹出某个 (val, times)
+      res += getInternalSum(k) + 2 * k;
+    }
+    // 当前数组入栈
+    if(st.top().val == arr[index]) st.top().times += 1;
+    else st.push(Node(arr[index]));
+    index = nextIndex(index, n);
+  }
+  while(st.size() > 2) {
+    int times = st.top().times;
+    st.pop();
+    res += getInternalSum(times) + 2*times;
+  }
+  if(st.size() == 2) {
+    int times = st.top().times;
+    st.pop();
+    res += getInternalSum(times) + (st.top().times == 1 ? times : 2*times);
+  }
+  res += getInternalSum(st.top().times);
+  return res;
+}
 ```
 
+### 链表问题
 
+#### 反转部分单向链表
+
+```c++
+// 反转整个链表
+ListNode* reverseList(ListNode* head) {
+  ListNode *pre = nullptr, *next = nullptr;
+  while(head) {
+    next = head->next;
+    head->next = pre;
+    pre = head;
+    head = next;
+  }
+  return pre;
+}
+
+// 反转部分链表
+// from 和 to 的范围为 [1, n], 链表长度为 n 
+ListNode* reversePart(ListNode *head, int from, int to) {
+  int len = 0;
+  ListNode *fromPre = nullptr, *toNext = nullptr, *node1 = head;
+  while(node1 != nullptr) {
+    ++len;
+    if(len == from - 1) fromPre = node1;
+    if(len == to + 1) toNext = node1;
+    node1 = node1->next;
+  }
+  if(from > to || from < 1 || to > len) return head;
+  // from = 1 可能使 fromPre 为 nullptr
+  node1 = (fromPre == nullptr) ? head : fromPre->next; 
+  ListNode *node2 = node1->next;
+  node1->next = toNext;
+  ListNode *next = nullptr;
+  while(node2 != toNext) {
+    next = node2->next;
+    node2->next = node1;
+    node1 = node2;
+    node2 = next;
+  }
+  if(fromPre != nullptr) {
+    fromPre->next = node1;
+    return head;
+  } 
+  return node1;
+}
+```
+
+#### 环形单链表的约瑟夫问题
+
+> 输入一个环形单链表的头结点`head`和报数的值`m`，表示每次从`1`叫到`m`，第`m`个删除，输出最后剩下的节点，且这个节点自己组成环形单链表
+
+```c++
+// 利用了圆圈剩下的最后的数字的结论
+ListNode* josephusKill(ListNode *head, int m) {
+  if(head == nullptr || head->next == head || m < 1) return head;
+  ListNode *cur = head;
+  int n = 0;
+  while(cur) ++n, cur = cur->next;
+  int last = 0; // 假定编号从 0 开始, 每次报数为 m-1 的淘汰出去
+  for(int i = 2; i <= n; ++i) last = (last + m) % i;
+  while(--last >= 0) head = head->next;
+  head->next = head;
+  return head;
+}
+```
+
+#### 判断链表是否为回文结构
+
+```c++
+// 可以用栈，但是会占用额外空间，这里采取反转链表后半部的方式实现
+bool isPalindrome(ListNode *head) {
+  if(head == nullptr || head->next == nullptr) return true;
+  ListNode *n1 = head, *n2 = head;
+  while(n2->next != nullptr && n2->next->next != nullptr) {
+    n1 = n1->next;  // 最终定位到中部
+    n2 = n2->next->next; // 最终定位到尾部或尾部的前一个
+  }
+  n2 = n1->next; // 右部分的第一个节点
+  n1->next = nullptr; 
+  ListNode *n3 = nullptr;
+  while(n2 != nullptr) { // 右半区反转
+    n3 = n2->next;
+    n2->next = n1;
+    n1 = n2;
+    n2 = n3;
+  }
+  n3 = n1;
+  n2 = head;
+  bool res = true;
+  while(n1 != nullptr && n2 != nullptr) { // 检查回文
+    if(n1->val != n2->val) {
+      res = false;
+      break;
+    }
+    n1 = n1->next;
+    n2 = n2->next;
+  }
+  n1 = n3->next;
+  n3->next = nullptr;
+  while(n1 != nullptr) { // 恢复列表
+    n2 = n1->next;
+    n1->next = n3;
+    n3 = n1;
+        n1 = n2;
+  }
+  return res;
+}
+```
+
+#### 将单链表的没k个节点之间逆序
+
+```c++
+// leetcode 25
+class Solution {
+public:
+  void reverse(ListNode *left, ListNode *start, ListNode *end, ListNode *right) {
+    ListNode *pre = start, *cur = start->next, *next = nullptr;
+    while(cur != right) {
+      next = cur->next;
+      cur->next = pre;
+      pre = cur;
+      cur = next;
+    }
+    if(left != nullptr) left->next = end;
+    start->next = right;
+  }
+
+  ListNode* reverseKGroup(ListNode* head, int k) {
+    if(k < 2) return head;
+    ListNode *cur = head, *start = nullptr, *pre = nullptr, *next = nullptr;
+    int count = 1;
+    while(cur != nullptr) {
+      next = cur->next;
+      if(count == k) {
+        start = pre == nullptr ? head : pre->next;
+        head = pre == nullptr ? cur : head;
+        reverse(pre, start, cur, next);
+        pre = start;
+        count = 0;
+      }
+      ++count;
+      cur = next;
+    }
+    return head;
+  }
+};
+```
 
 ### 数组和矩阵问题
 

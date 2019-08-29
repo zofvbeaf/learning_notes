@@ -353,6 +353,33 @@ void post_order(TreeNode *root) {
 + 整体问题的最优解依赖各子问题的最优解
 + 这些小问题之间还有相互重叠的更小的子问题
 
+#### 背包
+
+```c++
+// 01背包
+for(int i = 0; i < n; ++i)
+  for(int v = V; v >= cost[i]; --v)
+    dp[v] = max(dp[v], dp[v-cost[i]] + weight[i]);
+
+// 完全背包
+for(int i = 0; i < n; ++i)
+  for(int v = cost[i]; v <= V; ++v)
+    dp[v] = max(dp[v], dp[v-cost[i]] + weight[i]);
+```
+
+#### 最长非降子序列（LIS）
+
+```c++
+// f[i] = max{f[j]} + 1 (a[i] > a[j] && i > j)
+```
+
+#### 最长公共子序列（LCS）
+
+```c++
+// f[i][j] 表示 a 序列的前 i 个元素与 b 序列的前 j 个元素中最长公共子序列的长度
+// f[i][j] = max( f[i-1][j], f[i][j-1], f[i-1][j-1] + (a[i] == b[j]) )
+```
+
 ## 数据结构
 
 ### 并查集

@@ -988,6 +988,15 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 ![](https://ws1.sinaimg.cn/large/77451733gy1g5onviw5jzj21cr1x3dzv.jpg)
 
+#### 写流程
+
+- `glibc`的`write`通过`syscall`调用系统调用的`write`，系统调用的`write`内部找到`task_struct`中对于的`file`，从而找到`VFS`中对于的`inode`，之后调用`inode_operations`的写操作，对应不同的文件系统该写操作执行的函数可能不一样，但提供的接口都一样。
+- 具体文件系统的`write`会先把数据写入`page cache`，并把 相应的页标记为脏，等待某些时机把刷入磁盘
+- 刷磁盘的过程包括：
+  - 先把`page cache`的地址及其偏移和长度存入一个`bio_vec`，并放入`struct bio`中，这些`bio`会被组织成一个个`request`，以链表的形式组织
+  - 之后调度算法对这些`request`以`cfq`或`deadline`算法进行调度
+  - 最后设备驱动会从调度好的链表逐个取出`request`执行
+
 #### VFS层基本概念
 
 + `superblock`：代表一个已安装的文件系统
