@@ -12,8 +12,8 @@
 >
 > 以下为JOS启动流程。
 
-+ 计算机通电后先读取`BIOS`，加载到`960KB~1MB`地址出。
-+ BIOS进行硬件自检，同时打印硬件信息在屏幕上。有问题蜂鸣器会响。
++ 计算机通电后先读取`BIOS`，加载到`960KB~1MB`地址处。
++ `BIOS`进行硬件自检，同时打印硬件信息在屏幕上。有问题蜂鸣器会响。
 + 之后计算机读取BIOS设置好的优先级最高的外部存储设备。读取第一个扇区（512字节，即主引导记录`MBR`）到`0x7c00`处。如果这个扇区最后两个字节是`0x55`和`0XAA`表明可以启动，否则不能。
 + 主引导记录即`boot.S`，其中的主要流程包括：
   + 关中断，开`A20`线（兼容性问题，寻找范围更大），加载`段表`(`lgdt gdtdesc`)（包含操作系统内核的段信息），寻址方式变为`segment:offset`
@@ -306,7 +306,7 @@ enum zone_type {
 + 用户态与`mmap`有关的流程：
   + 调用`mmap`，映射一个文件的一部分或者一段内存空间
   + 如果`mmap`的时候要求`populate`，则需要先建立相关的映射（对于文件而言，需要预读数据到内核中，并建立映射关系；对于内存而言，需要映射相关的内存空间）
-  + 在用户态的运行过程中，可能会在访问某个地址时出现`page fault`。这时，`page fault`经过层层检查，发现是`mmap`的一段区域引发的，就会去建立映射关系（如上文）。
+  + 在用户态的运行过程中，可能会在访问某个地址时出现`page fault`。这时，`page fault`经过层层检查，发现是`mmap`的一段区域引发的，就会去建立映射关系（如上文）
   + 在建立好映射关系后，重新执行引起`page fault`的指令
   + 调用`msync`或者取消映射时，对于文件而言，需要将数据刷到磁盘上
   + 调用`munmap`取消映射
@@ -378,7 +378,7 @@ enum zone_type {
   + 使用 `slab` 分配不同大小的对象，精心选择 `size classes`，减少内存碎片
   + 使用多层缓存，内存的释放和分配会经历很多阶段，提升速度
 + 每个线程有一个`thread specific data`即 `struct tsd_s tsd`，其中有两个指针，`iarena`和`arena`分别指向用于元数据分配和用于普通数据分配的`arena`。所以，`tsd`需要找两个`arena`进行绑定（这两个`arena`可能是同一个）。
-+ `jemalloc`会创建多个`arena`，每个线程由一个 `arena` 负责。`arena`有引用计数字段`nthreads[2]`，`nthreads[0]`计录普通数据分配`arena`指针绑定这个`arena`的次数，`nthreads[1]`记录元数据分配`iarena`指针绑定这个`arena`的次数。一个`tsd`绑定`arena`后，就不会改变`arena`。
++ `jemalloc`会创建多个`arena`，每个线程由一个 `arena` 负责。`arena`有引用计数字段`nthreads[2]`，`nthreads[0]`记录普通数据分配`arena`指针绑定这个`arena`的次数，`nthreads[1]`记录元数据分配`iarena`指针绑定这个`arena`的次数。一个`tsd`绑定`arena`后，就不会改变`arena`。
 + 有一个全局变量`narenas_auto`，它在初始化时被计算好，表示能够创建的`arena`的最大数量。
 + 有多个`arena`，以全局数组的形式组织。每个线程有一个`tcache`，其中有指向某个`arena`的指针。
 + 当需要绑定一个`arena`时，遍历所有已创建的`arena`，并保存所有`arena`中`nthreads`值最小的那个（根据是绑定元数据还是普通数据，判断使用`nthreads[0]`还是`nthreads[1]`）。
@@ -941,7 +941,6 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
   };
   ```
   
-+ 
 
 ## 文件系统
 

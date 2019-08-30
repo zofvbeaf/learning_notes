@@ -365,6 +365,24 @@ for(int i = 0; i < n; ++i)
 for(int i = 0; i < n; ++i)
   for(int v = cost[i]; v <= V; ++v)
     dp[v] = max(dp[v], dp[v-cost[i]] + weight[i]);
+
+// 多重背包，每种物品 Mi 个，体积 Ci, 价值 Wi，背包容量为 V
+void MultiplePack(vector<int>& dp, int C, int W, int M) {
+    if (C * M ≥ V) {
+    	CompletePack(dp, C, W);
+    	return;
+	}
+    k = 1
+    while(k < M) {
+    	ZeroOnePack(dp, k*C, k*W);
+    	M -= k;
+    	k += k;
+    }
+    ZeroOnePack(dp, C*M, W*M);
+}
+// 二维费用背包, 假定付出两种费用 u 和 v
+// F[i, v, u] 表示前 i 件物品付出两种费用 u 和 v 时可获得的最大价值
+// F[i, v, u] = max{F[i-1, v, u], F[i-1, v-Ci, u-Di] + Wi};
 ```
 
 #### 最长非降子序列（LIS）
