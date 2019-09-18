@@ -965,9 +965,13 @@ void gen_primes(vector<int>& primes, vector<int>& vis, int n) {
 #### gcd和lcm
 
 ```c++
-int gcd(int a, int b) { return b == 0 ? a : gcd(b, a%b); }
+int gcd(int a, int b) {
+    if(a < 0) a = 0-a;
+    return b == 0 ? a : gcd(b, a%b); 
+}
 // 非递归实现
 int gcd(int a, int b) { 
+    if(a < 0) a = 0-a;
     while(b) { 
         int t = a % b; a = b; b = t; 
     }
@@ -993,11 +997,246 @@ void extgcd(int a, int b, int& d, int& x, int& y) {
 
 #### 同余方程
 
+```c++
+int mod(int x, int n) { return (x%n+n)%n; } // 对负数进行调整
+// 求 ax = 1 (mod n) 的解 x, 即 a 关于模 n 的逆
+int inv(int a, int n) {
+	int d, x, y;
+	extgcd(a, n, d, x, y);
+	return d == 1 ? mod(x, n) : -1;
+}
+
+// 输出线性模方程 ax = b (mod n) 的解 x 
+void linear_mod_equation(int a, int b, int n, vector<int>& sol) {
+	gcd(a, n, d, x, y);
+	if(b%d) return; // no solution
+	else {
+        int last = x * (b/d) % n; // first solution
+        sol.push_back(last); 
+        for(i = 1; i < d; i++) { // 总共会有 d 个解
+            last =  (last + n/d) % n;
+            sol.push_back(last);
+        }
+    }
+}
+
+// 中国剩余定理，用于求解 x = a[i] (mod m[i]), 共 n 个这样的方程组成的方程组
+int CRT(int n, vector<int>& a, vector<int>& m)
+{
+  int M = 1, w, d, x, y, ans = 0;
+  for(int i = 0; i < n; i++) M *= m[i];
+  for(int i = 0; i < n; i++){
+    w = M / m[i];
+    extgcd(m[i], w, d , x , y); 
+    ans = (ans + y*w*a[i]) % M; // accumulate e*的和a
+  }
+  return (M + ans%M)%M; // adjust to [0, M-1]
+}
 ```
 
++ `poj1006`：中国剩余定理解同余方程组模板题
++ `poj1061`：扩展欧几里德解线性方程
+
+#### 快速幂
+
+```c++
+// 矩阵快速幂
+class Matrix {
+public:
+  Matrix(int n, long long mod = 0) : n_(n), mod_(mod) {
+    matrix_.resize(n, vector<long long>(n, 0));
+  }
+
+  void init(int *a) {
+    int pos = 0;
+    for(int i = 0; i < n_; ++i)
+      for(int j = 0; j < n_; ++j) 
+        matrix_[i][j] = a[pos++];
+  }
+
+  void mul(Matrix* rhs) {
+    Matrix ans(n_, mod_);
+    for(int i = 0; i < n_; ++i) 
+      for(int j = 0; j < n_; ++j) 
+        for(int k = 0; k < n_; ++k) {
+          ans.matrix_[i][j] += matrix_[i][k] * rhs->matrix_[k][j];
+          if(mod_ > 0) ans.matrix_[i][j] %= mod_;
+        }
+    matrix_ = ans.matrix_;
+  }
+  // a^x
+  void pow(long long x) {
+    Matrix ans(n_, mod_);
+    for(int i = 0; i < n_; ++i) ans.matrix_[i][i] = 1;
+    while(x) {
+      if(x & 1) ans.mul(this);
+      x >>= 1;
+      mul(this); 
+    }
+    matrix_ = ans.matrix_;
+  }
+  
+  long long allsum() {
+    long long ans = 0;
+    for(int i = 0; i < n_; ++i) 
+      for(int j = 0; j < n_; ++j) {
+        ans += matrix_[i][j];
+        if(mod_ > 0) ans %= mod_;
+      }
+    return ans;
+  }
+
+  void printall() {
+    printf("{\n");
+    for(int i = 0; i < n_; ++i) 
+      for(int j = 0; j < n_; ++j) 
+        printf("%lld%c", matrix_[i][j], (j == n_-1 ? '\n' : ' '));
+    printf("}\n");
+  }
+
+public:
+  vector<vector<long long> > matrix_;
+  int n_;
+  long long mod_;
+};
+
+// 快速幂模 a^k % M
+LL pow_mod(LL a, LL k, LL M){
+    LL b = 1;
+    while(k){
+        if(k & 1) b = (a*b) % M;
+        a = (a % M) * (a % M) % M;
+        k /= 2;
+    }
+    return b;
+}
 ```
 
+#### 欧拉函数
 
+```c++
+// 欧拉函数：返回小于 n 且与 n 互素的整数的个数
+int euler_phi(int n) {
+  int m = (int)sqrt(n+0.5);
+  int ans = n;
+  for(int i = 2; i <= m; ++i) if(n%i == 0) {
+    ans = (i-1) * ans/i;
+    while(n%i == 0) n /= i;
+  }
+  if(n > 1) ans = (n-1) * ans/n;
+  return ans;
+}
+
+// 1 ~ n 中所有数的欧拉 phi 函数值
+void phi_table(int n, vector<int>& phi) {
+  phi.resize(n+1, 0);
+  phi[1] = 1;
+  for(int i = 2; i <= n; ++i) if(!phi[i]) {
+    for(int j = i; j <= n; j += i) {
+      if(!phi[j]) phi[j] = j;
+      phi[j] = (i-1) * phi[j]/i;
+    }
+  }
+}
+```
+
+#### 素数测试和因式分解
+
+```c++
+// x*y mod n
+LL mul_mod(LL x, LL y, LL n){
+        LL T = floor(sqrt(n) + 0.5);
+        LL t = T*T-n;
+        LL a = x/T; LL b = x%T;
+        LL c = y/T; LL d = y%T;
+        LL e = a*c/T; LL f = a*c%T;
+        LL v = ((a*d + b*c)%n + e*t) % n;
+        LL g = v/T; LL h = v%T;
+        LL ans = (((f + g)*t%n + b*d)%n + h*T)%n;
+        while(ans < 0) ans += n;
+        return ans;
+}
+// a^k mod p
+LL pow_mod(LL a, LL n, LL p)
+{
+        LL ans = 1, d = a % p;
+        do{
+                if(n & 1) ans = mul_mod(ans, d, p);
+                d = mul_mod(d, d, p);
+        }while(n >>= 1);
+        return ans;
+}
+//以a为基,n-1=x*2^t   a^(n-1) = 1(mod n)  验证n是不是合数
+//一定是合数返回true,不一定返回false
+//二次探测
+bool check(LL a, LL n, LL x, LL t)
+{
+    LL ret = pow_mod(a, x, n);
+    LL last = ret;
+    for(int i=1; i<=t; i++)
+    {
+        ret = mul_mod(ret, ret, n);
+        if(ret == 1 && last != 1 && last != n-1) return true;//合数
+        last = ret;
+    }
+    if(ret != 1) return true;
+    return false;
+}
+
+// miller_rabin()算法素数判定
+//是素数返回true.(可能是伪素数，但概率极小)
+//合数返回false;
+bool miller_rabin(LL n, LL times = 15)
+{
+    if(n < 2) return false;
+    if(n == 2 || n == 3 || n == 5 || n == 7) return true;
+    if((n%2 == 0) || (n%3 == 0) || (n%5 == 0) || (n%7 == 0)) return false;//偶数
+    LL x = n-1, t = 0;
+    while((x&1) == 0) x >>= 1, ++t;
+    for(int i = 0; i < times; ++i)
+    {
+        LL a = rand()%(n-1)+1;
+        if(check(a, n, x, t)) return false;//合数
+    }
+    return true;
+}
+
+LL gcd(LL a, LL b) { 
+    if(a < 0) return gcd(-a, b);
+    return b == 0 ? a : gcd(b, a%b); 
+}
+
+LL pollard_rho(LL x, LL c)
+{
+    LL i = 1,k = 2;
+    LL x0 = rand()%x;
+    LL y = x0;
+    while(1)
+    {
+        ++i;
+        x0 = (mul_mod(x0,x0,x) + c) % x;
+        LL d = gcd(y - x0, x);
+        if(d != 1 && d != x) return d;
+        if(y == x0) return x;
+        if(i == k) y = x0, k += k;
+    }
+}
+
+//对n进行素因子分解
+void findfac(LL n, vector<LL>& ans)
+{
+    if(miller_rabin(n)) {
+        ans.push_back(n);
+        return;
+    }
+    LL p = n;
+    while(p >= n) p = pollard_rho(p, rand()%(n-1)+1);
+    findfac(p, ans);//递归调用
+    findfac(n/p, ans);
+}
+```
+
++ poj1811：判断一个数是否是素数，若不是则返回最小的素因子
 
 ### [组合数学](https://oi-wiki.org/math/combination/)
 
@@ -1071,8 +1310,6 @@ void extgcd(int a, int b, int& d, int& x, int& y) {
 + 第二类斯特林数：`s(n, r) = r*s(n-1, r) + s(n-1, r-1),  n > r >= 1`
   + 把`n`个不同的球放到`r`个盒子里，假设没有空盒。考虑最后一个球，若它和前面的某一个球放在同一个盒子里或单独放一个盒子
 
-#### 康托展开
-
 #### 鸽笼原理
 
 +  `n+1` 个苹果，想要放到 `n` 个抽屉里，那么必然会有至少一个抽屉里有两个
@@ -1089,6 +1326,74 @@ void extgcd(int a, int b, int& d, int& x, int& y) {
 
 + 序列`{0,1，2，3，4，5...n}`的母函数就是`f(x)=0+x+2x^2+3x^3+4x^4+...+nx^n`
 + `hdu1028`：一个数字`n`能够拆成多少种数字的和，可以用母函数的思想或`DP`的思想来解
+
+## 图论
+
+### 最短路径
+
+```c++
+class Graph {
+public:
+  typedef pair<int, int> pii;
+
+  Graph(int n): n_(n) { g_.resize(n+1); }
+
+  void add_edge(int u, int v, int w) {
+    g_[u].push_back(make_pair(v, w));
+    g_[v].push_back(make_pair(u, w));
+  }
+  
+  int dijkstra(int s, int t) {
+    vector<int> visited(n_+1, 0);
+    vector<int> dist(n_+1, INF);
+    dist[s] = 0;
+    priority_queue<pii, vector<pii>, greater<pii> > q;
+    q.push(make_pair(dist[s], s));
+    while(!q.empty()) {
+      pii u = q.top();  q.pop();
+      int x = u.second;
+      if(u.first != dist[x]) continue;
+      if(u.second == t) break;
+      for(int i = 0; i < g_[x].size(); ++i) {
+        int y = g_[x][i].first, w = g_[x][i].second;
+        if(dist[y] > dist[x] + w) {
+          dist[y] = dist[x] + w;
+          q.push(make_pair(dist[y], y));
+        }
+      }
+    }
+    return dist[t];
+  }
+
+private:
+  vector< vector<pii> > g_; 
+  int n_;
+};
+```
+
++ `hiho1081`、`poj2387`：模板题
+
+## 计算几何
+
+```c++
+class Point {
+public:
+  
+  Point(double a = 0, double b = 0) : x(a), y(b) { }
+  
+  Point operator+(const Point& rhs) const { return Point(x + rhs.x, y + rhs.y); }
+  Point operator-(const Point& rhs) const { return Point(x - rhs.x, y - rhs.y); }
+
+  bool operator<(const Point& rhs) const { return x < rhs.x || (x == rhs.x && y < rhs.y); }
+  
+  double dot(const Point& rhs) const { return x*rhs.x + y*rhs.y; }
+  double length() const { return sqrt(x*x + y*y); }
+  double angle(const Point& rhs) const { return acos(dot(rhs)/length()/rhs.length()); }
+
+public:
+  double x, y;
+};
+```
 
 ## 资源网站
 
